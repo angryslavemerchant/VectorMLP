@@ -127,6 +127,43 @@ Findings:
 4. Vs matrix head-to-head, every new arm is equal-or-worse everywhere;
    matrix D=16 remains the best configuration tested.
 
+## Experiment 2c — D-sweep up (32, 64) + low-rank mixing (`mnist_task3.py`)
+
+Low-rank mixer added to VectorLinear: y = g + U(V g), rank r, 2*D*r
+params/neuron. At the 105k budget full-matrix D=64 is degenerate (matched
+width = 1: on-ramp 784*64 = 50k + readout matrices 41k), so low-rank is what
+makes D>=32 viable at all. Widths: lowrank-d16-r4 78, matrix-d32 23,
+lowrank-d32-r4 53, lowrank-d64-r4 24.
+
+NOTE: run executed on a remote box; per-seed json (`mnist_results3.json`) not
+retrieved yet, so gaps below are mean-level (still same seeded subsets), no
+seed-pairing counts.
+
+Mean gaps (pp) vs round-1 baselines:
+
+| arm | vs matrix, clean 500/2k | vs matrix, rot45 500/2k | vs mlp@matrix, rot45 500/2k |
+|---|---|---|---|
+| lowrank-d16-r4 | -0.23 / -0.32 | -0.87 / -0.93 | +0.84 / +0.92 |
+| matrix-d32 (23 neurons) | -0.05 / -0.10 | **+0.42 / -0.01** | **+2.13 / +1.84** |
+| lowrank-d32-r4 | -0.32 / -0.33 | -0.52 / -0.96 | +1.19 / +0.89 |
+| lowrank-d64-r4 | -0.55 / -0.72 | -0.31 / -0.67 | +1.40 / +1.18 |
+
+Findings:
+
+1. **matrix-d32 with 23 neurons ties the D=16 flagship on clean and posts the
+   best small-data rot45 of any arm tested** (+2.13 over the MLP at n=500).
+   The rot45 edge tracks full per-neuron matrices at the largest affordable D
+   — 23 fat vector neurons beat 64 thinner ones on robustness.
+2. **Rank-4 mixing keeps the clean edge but gives up ~half the small-n rot45
+   edge** (lowrank-d16 -0.9 pp vs matrix at 500/2k, converging by 60k). The
+   clean sample-efficiency benefit is cheap (consistent with round 2's ring3);
+   the robustness benefit needs high-rank mixing. Whatever matrix learns
+   about pose, it uses many mixing directions.
+3. **Low-rank does not rescue big D:** lowrank d32/d64 degrade monotonically
+   with D at n>=10k. The 784*D on-ramp tax buys channel resolution that never
+   pays for itself; D=64 is the worst large-n arm.
+4. Combined sweet spot after rounds 2b+2c: full matrix, D in [16, 32].
+
 ## Queue
 
 - FLOP-matched MLP control for exp 2.

@@ -41,7 +41,8 @@ class VectorLinear(nn.Module):
                  gate_order='gate_then_mix', per_channel_bias=None,
                  bias_init=-0.1, tie_groups=None, rank=4):
         super().__init__()
-        assert channel_mix in ('matrix', 'lowrank', 'ring', 'shared', 'none')
+        assert channel_mix in ('matrix', 'lowrank', 'lowrank_pure', 'ring',
+                               'shared', 'none')
         assert gate_order in ('gate_then_mix', 'mix_then_gate')
         if per_channel_bias is None:
             per_channel_bias = channel_mix != 'ring'
@@ -78,6 +79,15 @@ class VectorLinear(nn.Module):
             self.mix_u = nn.Parameter(0.01 * torch.randn(n_out, dim, rank))
             self.mix_v = nn.Parameter(0.01 * torch.randn(n_out, rank, dim))
             self.mix = None
+        elif channel_mix == 'lowrank_pure':
+            # pure factorization: y = U (V g), no identity path. The whole
+            # mixer is rank-`rank` — each neuron's channel state is compressed
+            # to `rank` numbers between layers. Variance-preserving init
+            # (V ~ 1/sqrt(D), U ~ 1/sqrt(rank)) since identity is unreachable.
+            self.rank = rank
+            self.mix_u = nn.Parameter(torch.randn(n_out, dim, rank) / math.sqrt(rank))
+            self.mix_v = nn.Parameter(torch.randn(n_out, rank, dim) / math.sqrt(dim))
+            self.mix = None
         elif channel_mix == 'shared':
             self.mix = nn.Parameter(torch.eye(dim) + 0.01 * torch.randn(dim, dim))
         elif channel_mix == 'ring':
@@ -96,9 +106,10 @@ class VectorLinear(nn.Module):
     def _mix_channels(self, g):
         if self.channel_mix == 'matrix':
             return torch.einsum('mde,bme->bmd', self.mix, g)
-        if self.channel_mix == 'lowrank':
+        if self.channel_mix in ('lowrank', 'lowrank_pure'):
             low = torch.einsum('mre,bme->bmr', self.mix_v, g)
-            return g + torch.einsum('mdr,bmr->bmd', self.mix_u, low)
+            up = torch.einsum('mdr,bmr->bmd', self.mix_u, low)
+            return g + up if self.channel_mix == 'lowrank' else up
         if self.channel_mix == 'shared':
             return torch.einsum('de,bme->bmd', self.mix, g)
         if self.channel_mix == 'ring':
