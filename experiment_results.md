@@ -135,9 +135,9 @@ width = 1: on-ramp 784*64 = 50k + readout matrices 41k), so low-rank is what
 makes D>=32 viable at all. Widths: lowrank-d16-r4 78, matrix-d32 23,
 lowrank-d32-r4 53, lowrank-d64-r4 24.
 
-NOTE: run executed on a remote box; per-seed json (`mnist_results3.json`) not
-retrieved yet, so gaps below are mean-level (still same seeded subsets), no
-seed-pairing counts.
+(Per-seed json retrieved; paired counts confirm the mean-level reads below —
+matrix-d32 rot45 vs mlp@matrix: +2.14 (5/5) / +1.84 (5/5) / +1.02 (5/5) at
+500/2k/10k.)
 
 Mean gaps (pp) vs round-1 baselines:
 
@@ -163,6 +163,40 @@ Findings:
    with D at n>=10k. The 784*D on-ramp tax buys channel resolution that never
    pays for itself; D=64 is the worst large-n arm.
 4. Combined sweet spot after rounds 2b+2c: full matrix, D in [16, 32].
+
+## Experiment 2d — pure low-rank factorization (`mnist_task4.py`)
+
+y = U(V g), no identity path: the whole mixer is rank-r (vs 2c's residual
+form g + UVg). purelr-d16-r8 is param-IDENTICAL to the round-1 matrix
+flagship (2*16*8 = 256 = 16^2 per neuron; same width 64, same 105,152 total)
+— pure reparameterization test. purelr-d16-r4 gets width 78.
+
+Paired per-seed gaps (pp):
+
+| arm | vs mlp@matrix clean 500 | vs mlp@matrix rot45 500/2k/10k | vs matrix clean 500 | vs matrix rot45 500 |
+|---|---|---|---|---|
+| purelr-d16-r4 | +1.30 (5/5) | +1.65/+1.52/+1.29 (all 5/5) | +0.01 | -0.07 |
+| purelr-d16-r8 | **+1.66 (5/5)** | +1.87/+1.73/+1.30 (all 5/5) | **+0.37 (5/5)** | +0.15 |
+
+Findings:
+
+1. **Prediction falsified: rank is NOT the constraint.** Pure rank-4 matches
+   the full matrix everywhere, including rot45. Round 2c's "robustness needs
+   high-rank mixing" was wrong — the residual form's weakness was never its
+   rank.
+2. **The residual identity path is what hurt.** Residual r4 lost ~0.9 pp
+   rot45 vs matrix; pure r4 loses nothing. Likely init/optimization: residual
+   starts with mixing ~ 0 (U,V both 0.01 -> product 1e-4) and must grow it
+   against a working identity path; pure starts with variance-preserving
+   full-strength random mixing it must immediately use. Mixing strength at
+   init, not mixer rank, looks like the operative variable.
+3. **purelr-d16-r8 slightly beats its param-identical full-matrix twin on
+   clean small-data** (+0.37, 5/5 at n=500; best clean edge of any arm at
+   +1.66 over the MLP). Factorized parameterization of the same map acts as
+   a mild regularizer.
+4. Practical: rank-4 pure halves mixer params/FLOPs with zero measured cost —
+   the default mixer for the transformer FFN-slot test should be
+   lowrank_pure r=D/4 (and it removes the D^2 obstacle to D=32/64 there).
 
 ## Queue
 
