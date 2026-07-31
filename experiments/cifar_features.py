@@ -17,6 +17,12 @@ import torch
 import torch.nn.functional as F
 from torchvision.datasets import CIFAR10
 
+# HF CDN mirror of the exact official tarball (same size + checksum; the
+# Toronto origin server throttles to ~80 kB/s). torchvision still verifies
+# the md5 after download.
+CIFAR10.url = ('https://huggingface.co/datasets/liangnanying/cifar-10-python'
+               '/resolve/main/cifar-10-python.tar.gz')
+
 OUT = ROOT / 'data' / 'cifar_dino_vits16.pt'
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 BATCH = 128
