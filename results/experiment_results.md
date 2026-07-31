@@ -198,6 +198,36 @@ Findings:
    the default mixer for the transformer FFN-slot test should be
    lowrank_pure r=D/4 (and it removes the D^2 obstacle to D=32/64 there).
 
+## Experiment 3 — frozen DINO features, head swap (`cifar_head_task.py`)
+
+CIFAR-10 through frozen DINO ViT-S/16 (cached 384-d CLS features,
+`cifar_features.py`); heads at ~26k params, 5 seeds, sizes 500/2k/10k/50k.
+The "guest in a scalar world" test: 384 features reshaped to 24 x 16 vectors,
+NO on-ramp (vector_in=True). rot45 = images rotated before the backbone.
+
+Means (clean): vec 82.1/87.6/91.2/93.4 vs mlp 90.2/92.5/94.2/95.4 —
+**vector head loses by 5-8 pts everywhere**; rot45 worse (-14 pts at 500).
+vec-perm == vec (grouping irrelevant).
+
+Findings:
+
+1. **Free-reshape drop-in is dead.** Diagnosis: input wiring starvation —
+   the reshape gives 24x64 ~ 1.5k input weights (one scalar per GROUP of 16
+   features) vs the MLP's 384x57 ~ 22k (every feature individually
+   weighted). DINO's 384 dims are individually meaningful with no channel
+   structure to exploit (perm control confirms), so forcing features to
+   travel in gangs of 16 throws away most of the input resolution.
+2. Container-not-generator again, now at the interface: a frozen scalar
+   representation has nothing to pour into the channels. MNIST worked
+   because the learned on-ramp MANUFACTURED channel structure; the reshape
+   removed the on-ramp and the frozen host supplied nothing.
+3. Not killed: co-adapting hosts (transformer FFN slot — the host trains
+   with the vector layer and can develop channel structure to feed it).
+4. Diagnostic arm added (`vec-onramp`, width 26): learned per-feature 16-d
+   directions on the same features — restores per-feature wiring + learned
+   channel placement at the same param count. Separates "interface failed"
+   from "neuron fails on features". PENDING.
+
 ## Queue
 
 - FLOP-matched MLP control for exp 2.

@@ -23,7 +23,8 @@ sys.path.insert(0, str(ROOT))
 
 import torch
 
-from vector_mlp import VectorMLP, PlainMLP, count_params, matched_mlp_width
+from vector_mlp import (VectorMLP, PlainMLP, count_params, matched_mlp_width,
+                        matched_width)
 from experiments.mnist_grid import (balanced_subset, make_models, train_stack,
                                     eval_stack)
 
@@ -58,14 +59,24 @@ def main():
 
     target = count_params(vec_head())
     mlp_w, mlp_par = matched_mlp_width(target, FEAT, 10, len(HIDDEN))
+    # learned on-ramp diagnostic: per-feature 16-d directions (384 input
+    # vectors, full per-feature input wiring) instead of the free reshape.
+    # Separates "reshape interface failed" from "neuron fails on features".
+    ramp_w, ramp_par = matched_width(
+        target, lambda w: VectorMLP(FEAT, [w] * len(HIDDEN), 10, DIM,
+                                    channel_mix='lowrank_pure', rank=4))
     print(f'vec head: {target:,} params | mlp head: width {mlp_w}, '
-          f'{mlp_par:,} params', flush=True)
+          f'{mlp_par:,} params | vec-onramp: width {ramp_w}, '
+          f'{ramp_par:,} params', flush=True)
 
     arms = {
-        'vec':      (vec_head, tx, ex, ex_rot),
-        'vec-perm': (vec_head, tx[:, perm], ex[:, perm], ex_rot[:, perm]),
-        'mlp':      (lambda: PlainMLP(FEAT, [mlp_w] * len(HIDDEN), 10),
-                     tx, ex, ex_rot),
+        'vec':        (vec_head, tx, ex, ex_rot),
+        'vec-perm':   (vec_head, tx[:, perm], ex[:, perm], ex_rot[:, perm]),
+        'mlp':        (lambda: PlainMLP(FEAT, [mlp_w] * len(HIDDEN), 10),
+                       tx, ex, ex_rot),
+        'vec-onramp': (lambda: VectorMLP(FEAT, [ramp_w] * len(HIDDEN), 10, DIM,
+                                         channel_mix='lowrank_pure', rank=4),
+                       tx, ex, ex_rot),
     }
 
     results = {}
