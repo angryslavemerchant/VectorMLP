@@ -69,6 +69,19 @@ def main():
           f'{mlp_par:,} params | vec-onramp: width {ramp_w}, '
           f'{ramp_par:,} params', flush=True)
 
+    # mixer ablations on the reshape base: 'none' = channels never interact
+    # (16 disjoint thin MLPs, one per within-group position, meeting only at
+    # the readout); 'ring' = K=5 circular conv over the 16 channel positions
+    # (assumes neighboring features within a group are related — arbitrary
+    # for DINO, so this measures structured-local vs none vs full mixing).
+    def abl_head(mix, **kw):
+        w, got = matched_width(
+            target, lambda w: VectorMLP(N_VEC, [w] * len(HIDDEN), 10, DIM,
+                                        channel_mix=mix, vector_in=True, **kw))
+        print(f'vec-{mix}: width {w}, {got:,} params', flush=True)
+        return lambda: VectorMLP(N_VEC, [w] * len(HIDDEN), 10, DIM,
+                                 channel_mix=mix, vector_in=True, **kw)
+
     arms = {
         'vec':        (vec_head, tx, ex, ex_rot),
         'vec-perm':   (vec_head, tx[:, perm], ex[:, perm], ex_rot[:, perm]),
@@ -77,6 +90,8 @@ def main():
         'vec-onramp': (lambda: VectorMLP(FEAT, [ramp_w] * len(HIDDEN), 10, DIM,
                                          channel_mix='lowrank_pure', rank=4),
                        tx, ex, ex_rot),
+        'vec-none':   (abl_head('none'), tx, ex, ex_rot),
+        'vec-ring':   (abl_head('ring', kernel_size=5), tx, ex, ex_rot),
     }
 
     results = {}
