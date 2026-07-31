@@ -183,6 +183,133 @@ class VectorMLP(nn.Module):
         return (v * self.class_dirs).sum(-1)          # [B, C]
 
 
+class ProjLinear(nn.Module):
+    """Variant A hidden layer: [B, N_in, D] -> [B, N_out, D].
+
+    Each neuron: scalar-weight sum of incoming vectors, per-neuron DxD
+    projection, then a magnitude-thresholded direction-preserving
+    nonlinearity (modReLU):
+
+        v = sum_i w_i x_i          r = P v
+        y = ReLU(||r|| + b) * r / (||r|| + eps)
+
+    ||r|| (not ||r||^2) keeps the layer degree-1 homogeneous so magnitudes
+    don't square with depth. The gate is the only nonlinearity; direction
+    passes through linearly. ||Pv||^2 = v^T P^T P v makes each neuron's
+    firing a learned quadratic form of the summed vector — constructive vs
+    destructive interference of input directions.
+    """
+
+    def __init__(self, n_in, n_out, dim, bias_init=-0.1):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(n_out, n_in) / math.sqrt(n_in))
+        eye = torch.eye(dim).expand(n_out, dim, dim)
+        self.proj = nn.Parameter(eye + 0.01 * torch.randn(n_out, dim, dim))
+        self.bias = nn.Parameter(torch.full((n_out,), float(bias_init)))
+
+    def forward(self, x):
+        v = torch.einsum('oi,bid->bod', self.weight, x)
+        r = torch.einsum('odc,boc->bod', self.proj, v)
+        n = torch.sqrt((r * r).sum(-1) + 1e-12)          # [B, n_out]
+        a = F.relu(n + self.bias)
+        return (a / (n + 1e-6)).unsqueeze(-1) * r
+
+
+class ProjNet(nn.Module):
+    """Variant A: every inter-neuron signal is one D-vector; magnitude is
+    activation strength, direction is identity, coupled.
+
+    On-ramp:  per-input learned unit direction, v_i = x_i * d_i (input_dim x D
+              params — full per-feature wiring at D scalars per feature).
+    Off-ramp: linear readout on the flattened final vectors (subsumes the
+              spec's per-class direction dot as a special case).
+    """
+
+    def __init__(self, in_features, hidden, num_classes, dim, bias_init=-0.1):
+        super().__init__()
+        self.dim = dim
+        self.dirs = nn.Parameter(
+            F.normalize(torch.randn(in_features, dim), dim=-1))
+        widths = [in_features] + list(hidden)
+        self.layers = nn.ModuleList(
+            ProjLinear(a, b, dim, bias_init=bias_init)
+            for a, b in zip(widths[:-1], widths[1:]))
+        self.head = nn.Linear(widths[-1] * dim, num_classes)
+
+    def forward(self, x):
+        v = x.unsqueeze(-1) * self.dirs
+        for layer in self.layers:
+            v = layer(v)
+        return self.head(v.flatten(1))
+
+
+class TagLinear(nn.Module):
+    """Variant B hidden layer: scalars + per-neuron identity tags.
+
+    Incoming: activations a [B, N_in] and the sender layer's fixed tags
+    V [N_in, D]. Scalar path is a standard weighted sum z; the direction
+    path computes an agreement gain g that multiplies it:
+
+        mode='weighted': r_n = sum_i w_ni a_i v_i   (per-neuron field; the
+                         connection weights are REUSED, so agreement is over
+                         the inputs this neuron cares about)   g_n = ||r_n||^2
+        mode='query':    r = sum_i a_i v_i          (one shared field/layer)
+                         g_n = (q_n . r)^2          (per-neuron query dir)
+
+        gain = g / (1 + g)   (bounded, no dead-zone except r = 0 exactly)
+        a_out = ReLU(z * gain + bias)
+
+    Outputs its own tag matrix [N_out, D] for the next layer.
+    """
+
+    def __init__(self, n_in, n_out, dim, mode='weighted', out_tags=True):
+        super().__init__()
+        assert mode in ('weighted', 'query')
+        self.mode = mode
+        self.weight = nn.Parameter(torch.randn(n_out, n_in) * math.sqrt(2.0 / n_in))
+        self.bias = nn.Parameter(torch.zeros(n_out))
+        # the last hidden layer's tags would never be read (the off-ramp is a
+        # standard linear on scalars), so it is built with out_tags=False
+        self.tag = (nn.Parameter(F.normalize(torch.randn(n_out, dim), dim=-1))
+                    if out_tags else None)
+        if mode == 'query':
+            self.query = nn.Parameter(torch.randn(n_out, dim) / math.sqrt(dim))
+
+    def forward(self, a, tags_in):
+        z = a @ self.weight.T
+        if self.mode == 'weighted':
+            r = torch.einsum('oi,bi,id->bod', self.weight, a, tags_in)
+            g = (r * r).sum(-1)                          # [B, n_out]
+        else:
+            r = a @ tags_in                              # [B, D]
+            g = torch.einsum('od,bd->bo', self.query, r) ** 2
+        return F.relu(z * (g / (1 + g)) + self.bias), self.tag
+
+
+class TagNet(nn.Module):
+    """Variant B (decoupled): signals are (scalar activation, fixed identity
+    tag). On-ramp passes scalars through with a learned tag per input.
+    Off-ramp is a standard linear classifier on the final scalars.
+    """
+
+    def __init__(self, in_features, hidden, num_classes, dim, mode='weighted'):
+        super().__init__()
+        self.dim = dim
+        self.tags_in = nn.Parameter(
+            F.normalize(torch.randn(in_features, dim), dim=-1))
+        widths = [in_features] + list(hidden)
+        self.layers = nn.ModuleList(
+            TagLinear(a, b, dim, mode=mode, out_tags=i < len(hidden) - 1)
+            for i, (a, b) in enumerate(zip(widths[:-1], widths[1:])))
+        self.head = nn.Linear(widths[-1], num_classes)
+
+    def forward(self, x):
+        a, tags = x, self.tags_in
+        for layer in self.layers:
+            a, tags = layer(a, tags)
+        return self.head(a)
+
+
 class PlainMLP(nn.Module):
     """Param-matched baseline: ReLU MLP over the raw scalar inputs."""
 

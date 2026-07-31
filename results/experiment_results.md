@@ -242,6 +242,14 @@ drop-in claim.
 
 ## Queue
 
+- **Pending box runs:** `cifar_head_task.py` round 1 (now 6 arms incl.
+  vec-none/vec-ring mixer ablations), `cifar_e2e.py` round 1 (cnn-vec vs
+  cnn-mlp co-adaptation test).
+- **New-neuron rounds (built, awaiting run):** `cifar_head_task.py 2` and
+  `cifar_e2e.py 2` — Variant A (ProjNet, coupled magnitude/direction,
+  modReLU) and Variant B (TagNet weighted/query agreement gating) at D=2–4,
+  param-matched to the round-1 vec targets. Spec + as-built deviations in
+  docs/vector_neuron_variants_ab.md.
 - FLOP-matched MLP control for exp 2.
 - Rot45 gap vs rotation angle; pose linear probe (why is matrix robust?).
 - Middle rungs of the structure ladder (init-not-frozen, soft radial tying,

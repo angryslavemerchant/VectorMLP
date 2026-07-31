@@ -11,6 +11,14 @@ Arms (identical backbone, ~same total params):
               (pure rank-4 mixing)
     cnn-mlp   SmallCNN -> param-matched plain MLP head
 
+Round 2 (`python experiments/cifar_e2e.py 2`) swaps in the new neuron
+architectures as heads on the same trainable backbone, head-param-matched to
+the round-1 vec head:
+
+    cnn-proj-d4   ProjNet head (Variant A: coupled magnitude/direction)
+    cnn-tagw-d4   TagNet 'weighted' head (Variant B, agreement over weights)
+    cnn-tagq-d4   TagNet 'query' head (Variant B, per-neuron query direction)
+
 Sizes x 5 seeds, vmap-stacked. Heavier than the head-only grids (conv
 activations for 15 stacked models) — meant for a box, not the laptop.
 """
@@ -27,11 +35,14 @@ import torch.nn as nn
 
 from torchvision.datasets import CIFAR10
 
-from vector_mlp import VectorMLP, PlainMLP, count_params, matched_mlp_width
+from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
+                        matched_mlp_width, matched_width)
 from experiments.mnist_grid import balanced_subset, train_stack, eval_stack
 from experiments.cifar_features import rotated  # also patches the HF mirror
 
-OUT_JSON = ROOT / 'results' / 'cifar_e2e_results.json'
+ROUND = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+OUT_JSON = ROOT / 'results' / (
+    'cifar_e2e_results.json' if ROUND == 1 else f'cifar_e2e_results{ROUND}.json')
 DIM = 16
 HEAD_HIDDEN = [64, 64]
 SIZES = [2000, 10000, 50000]
@@ -96,14 +107,33 @@ def main():
                          channel_mix='lowrank_pure', rank=4, vector_in=True)
 
     head_target = count_params(vec_head())
-    mlp_w, mlp_par = matched_mlp_width(head_target, 2048, 10, len(HEAD_HIDDEN))
-    print(f'vec head {head_target:,} | mlp head width {mlp_w}, {mlp_par:,} | '
-          f'backbone {count_params(SmallCNN()):,}', flush=True)
 
-    arms = {
-        'cnn-vec': lambda: E2E(vec_head()),
-        'cnn-mlp': lambda: E2E(PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10)),
-    }
+    if ROUND == 1:
+        mlp_w, mlp_par = matched_mlp_width(head_target, 2048, 10, len(HEAD_HIDDEN))
+        print(f'vec head {head_target:,} | mlp head width {mlp_w}, {mlp_par:,} | '
+              f'backbone {count_params(SmallCNN()):,}', flush=True)
+        arms = {
+            'cnn-vec': lambda: E2E(vec_head()),
+            'cnn-mlp': lambda: E2E(PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10)),
+        }
+    else:
+        print(f'round 2: matching new-neuron heads to {head_target:,} params',
+              flush=True)
+
+        def new_arm(name, build):
+            w, got = matched_width(head_target, build)
+            print(f'{name}: head width {w}, {got:,} params', flush=True)
+            return lambda: E2E(build(w))
+
+        arms = {
+            f'cnn-{name}': new_arm(name, build)
+            for name, build in {
+                'proj-d4': lambda w: ProjNet(2048, [w] * len(HEAD_HIDDEN), 10, 4),
+                'tagw-d4': lambda w: TagNet(2048, [w] * len(HEAD_HIDDEN), 10, 4,
+                                            mode='weighted'),
+                'tagq-d4': lambda w: TagNet(2048, [w] * len(HEAD_HIDDEN), 10, 4,
+                                            mode='query'),
+            }.items()}
 
     results = {}
     for name, factory in arms.items():
