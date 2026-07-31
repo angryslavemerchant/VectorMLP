@@ -223,10 +223,22 @@ Findings:
    removed the on-ramp and the frozen host supplied nothing.
 3. Not killed: co-adapting hosts (transformer FFN slot — the host trains
    with the vector layer and can develop channel structure to feed it).
-4. Diagnostic arm added (`vec-onramp`, width 26): learned per-feature 16-d
+4. Diagnostic arm (`vec-onramp`, width 26): learned per-feature 16-d
    directions on the same features — restores per-feature wiring + learned
-   channel placement at the same param count. Separates "interface failed"
-   from "neuron fails on features". PENDING.
+   channel placement at the same param count. Result: 84.4/89.3/92.7/94.3
+   clean — recovers ~2.3 of the ~8-pt gap, still ~6 behind the MLP
+   everywhere. **The neuron itself underperforms on frozen feature-space
+   inputs**, not just the reshape interface. Caveat: the interface cost
+   squeezed hidden width to 26, so a FLOP-matched version might close more;
+   but the shape of the verdict is clear.
+
+**Verdict for the drop-in program:** vector neurons earn their keep when
+they build the representation (pixels + learned on-ramp: sample-efficiency
+and rotation-robustness edges, 5/5 seeds) and lose when consuming someone
+else's scalar representation (frozen features: -6 to -8 pts). The open
+middle case — a host that trains jointly and can co-adapt (transformer FFN
+slot) — remains untested and is the only untried branch of the original
+drop-in claim.
 
 ## Queue
 
