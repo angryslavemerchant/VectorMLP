@@ -240,17 +240,84 @@ middle case — a host that trains jointly and can co-adapt (transformer FFN
 slot) — remains untested and is the only untried branch of the original
 drop-in claim.
 
+## Experiment 3b — mixer ablations on DINO heads (round-1 arms 5-6)
+
+vec-none (no mixing = 16 disjoint thin MLPs, width 131) and vec-ring (K=5
+circular conv, width 140), same 26k budget. Paired vs vec (clean):
+
+    vec-none - vec:  -10.28 / -6.17 / -3.07 / -0.69   (0/5 everywhere)
+    vec-ring - vec:  -10.43 / -4.37 / -1.97 / -0.78   (0/5 everywhere)
+
+Even where the vector neuron loses to the MLP, its mixer is doing heavy
+lifting: removing it costs another 10 pts at n=500. Ladder on frozen
+features: none ~ ring < vec (rank-4) < vec-onramp < mlp. Cheap mixers do
+NOT buy their width back here (opposite of MNIST round 2b, where ring3
+recovered ~90% of the matrix edge) — on unstructured features, arbitrary
+neighbor topology is worthless and only full learned mixing helps.
+
+## Experiment 4 — end-to-end small CNN, co-adapting host (`cifar_e2e.py`)
+
+SmallCNN backbone (94k) trained jointly with each head (~33k), CIFAR
+pixels, sizes 2k/10k/50k. cnn-vec = reshape 2048 -> 128 x 16, purelr-r4.
+
+    cnn-vec - cnn-mlp (clean):  +2.24 (4/5) / -1.52 (1/5) / -1.57 (0/5)
+    rot45: ~0 everywhere.
+
+**Co-adaptation is real but partial**: the trainable backbone erases the
+catastrophic frozen-feature gap (-6 to -8 -> ~+2/-1.5) and restores the
+small-data edge, but the old neuron still loses at scale. The MNIST
+pattern (edge shrinks as n grows) reappears, now crossing zero.
+
+## Experiment 5 — new neuron variants A/B (`*_task.py 2`, `cifar_e2e.py 2`)
+
+Architecture pivot (docs/vector_neuron_variants_ab.md): ProjNet = Variant A
+(signals are single D-vectors, modReLU magnitude gate, per-neuron DxD
+projection — quadratic-form interference detector); TagNet = Variant B
+(scalar path x bounded agreement gain; 'weighted' reuses connection weights
+in the direction path, 'query' uses a per-neuron query on a shared field).
+D=2-4, all param-matched to the round-1 vec targets, same seeds/subsets.
+
+DINO heads (clean, means): proj-d2 88.9/91.6/93.0/95.1, proj-d4
+88.7/91.5/92.9/95.0, tagw-d4 89.1/92.0/93.9/95.1, tagq-d4
+86.9/90.8/93.2/94.8. Paired highlights:
+
+1. **The new neurons leapfrog the whole old family.** proj-d4 - vec: +6.60
+   / +3.87 / +1.64 / +1.61, tagw-d4 - vec: +6.99 / +4.41 / +2.69 / +1.71
+   (all 5/5). proj-d4 beats even vec-onramp +4.33 (5/5) at n=500. The gap
+   to the MLP shrinks from -8 to about -1 (still 0/5 clean — mlp keeps a
+   small consistent edge on frozen features).
+2. **First rot45 win on real images:** tagw-d4 - mlp rot45 = +1.27 (4/5)
+   at n=10k, +1.63 (4/5) at n=50k (loses at small n). proj-d4 reaches
+   parity at 50k. The agreement-gated scalar neuron generalizes to rotated
+   inputs better than the MLP once it has data.
+3. D=2 ~ D=4 for ProjNet on clean (geometry is cheap); d4 slightly better
+   rot45. Ablate D upward only if a use case demands it.
+
+End-to-end CNN (clean, means): cnn-proj-d4 47.9/62.4/73.1 — **best arm in
+the whole e2e table at every size**, despite head width 11 (it pays the
+full 2048-input wiring tax):
+
+    cnn-proj-d4 - cnn-mlp: +4.18 (5/5) / +1.25 (4/5) / +0.26 (3/5)
+    cnn-proj-d4 - cnn-vec: +1.94 / +2.77 / +1.83  (all 5/5)
+
+First architecture in the project to beat the param-matched MLP with a
+trainable host across all sizes (means; 50k is within noise). TagNets
+collapse end-to-end (tagw -6 to -15, tagq -5 to -17, seed std up to 14):
+the multiplicative gain destabilizes joint training with a backbone —
+usable as a head on fixed features, fragile as a training partner.
+
+**Verdict update:** Variant A (ProjNet) supersedes the channel-mixing
+neuron: better on frozen features (+2 to +7), better end-to-end (+2 to +3),
+and the only arm ever ahead of the MLP under co-adaptation. TagNet-weighted
+holds the single rot45-beats-mlp result on frozen features. The old
+neuron's remaining unique win is the MNIST pixel regime.
+
 ## Queue
 
-- **Pending box runs:** `cifar_head_task.py` round 1 (now 6 arms incl.
-  vec-none/vec-ring mixer ablations), `cifar_e2e.py` round 1 (cnn-vec vs
-  cnn-mlp co-adaptation test).
-- **New-neuron rounds (built, awaiting run):** `cifar_head_task.py 2` and
-  `cifar_e2e.py 2` — Variant A (ProjNet, coupled magnitude/direction,
-  modReLU) and Variant B (TagNet weighted/query agreement gating) at D=2–4,
-  param-matched to the round-1 vec targets. Spec + as-built deviations in
-  docs/vector_neuron_variants_ab.md.
-- FLOP-matched MLP control for exp 2.
+- FLOP-matched MLP control for exp 2 (and now for proj-d4 e2e, where the
+  width-11 squeeze makes FLOP-matching bite in the other direction).
+- TagNet e2e instability: warmup or gain clamp if we ever need B in a
+  trainable host.
 - Rot45 gap vs rotation angle; pose linear probe (why is matrix robust?).
 - Middle rungs of the structure ladder (init-not-frozen, soft radial tying,
   small-data angle task).
