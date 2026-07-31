@@ -140,12 +140,21 @@ class VectorMLP(nn.Module):
 
     def __init__(self, in_features, hidden, num_classes, dim,
                  channel_mix='matrix', proj_init=None, freeze_proj=False,
-                 readout='dirs', tie_first=None, **layer_kw):
+                 readout='dirs', tie_first=None, vector_in=False, **layer_kw):
         super().__init__()
         assert readout in ('dirs', 'pooled')
-        # unit-std per channel so hidden activations start at O(1) scale
-        proj = torch.randn(in_features, dim) if proj_init is None else proj_init.clone()
-        self.proj_in = nn.Parameter(proj, requires_grad=not freeze_proj)
+        self.dim = dim
+        if vector_in:
+            # input already carries channel structure: forward takes
+            # [B, in_features, dim] (or flat [B, in_features*dim], reshaped) —
+            # no on-ramp. Interface for dropping into scalar hosts: a host
+            # activation block of in_features*dim scalars is reinterpreted as
+            # in_features vector neurons.
+            self.proj_in = None
+        else:
+            # unit-std per channel so hidden activations start at O(1) scale
+            proj = torch.randn(in_features, dim) if proj_init is None else proj_init.clone()
+            self.proj_in = nn.Parameter(proj, requires_grad=not freeze_proj)
         widths = [in_features] + list(hidden)
         self.layers = nn.ModuleList(
             VectorLinear(a, b, dim, channel_mix=channel_mix,
@@ -159,7 +168,10 @@ class VectorMLP(nn.Module):
 
     def hidden(self, x):
         """Last hidden layer's vectors [B, N, D] (for probes)."""
-        v = x.unsqueeze(-1) * self.proj_in
+        if self.proj_in is None:
+            v = x.reshape(x.shape[0], -1, self.dim)
+        else:
+            v = x.unsqueeze(-1) * self.proj_in
         for layer in self.layers:
             v = layer(v)
         return v
