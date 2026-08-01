@@ -123,3 +123,100 @@ class MGNNet(nn.Module):
     def gate_distributions(self):
         """List of per-layer gate tensors [n_out, 3], for histograms."""
         return [layer.gate_distribution() for layer in self.layers]
+
+
+class MGNv2Linear(nn.Module):
+    """Matmul-native multi-gate layer: [B, n_in] -> [B, n_out].
+
+    Same three-path/gated-mixture idea as MGNLinear, but the squash is
+    applied to the INPUT before weighting, so every path is one plain
+    matmul with the shared weight matrix — no [B, n_out, n_in] expansion,
+    no custom kernels, tensor-core friendly (~3x a plain linear layer).
+
+    With p = sigmoid(in_scale * x + in_shift) (per-input learned squash,
+    shared across output neurons) and u its logit:
+
+        s_sum = W @ x + b                       unchanged
+        s_and = exp((W @ log p) / n)            weighted geometric mean:
+                                                prod p_i^(w_i/n)
+        s_or  = 1 - exp((W @ log(1 - p)) / n)   normalized noisy-OR:
+                                                1 - prod (1-p_i)^(w_i/n)
+
+    Weights act as log-space exponents ("how much this input's truth value
+    counts"), and a NEGATIVE weight is soft negation: p^(-|w|) fires when
+    the input is off. Both /n normalizations play the same role as the
+    spec's geometric mean: without them the products vanish/saturate as
+    fan-in grows. What v1 has and v2 gives up: per-synapse truth
+    thresholds (v1's sigmoid(w*x) lets each connection place its own
+    threshold; here the per-input affine is shared across output neurons).
+
+    The exponent W @ log p / n can go large-positive when negative weights
+    meet p ~ 0, so it is clamped before exp for stability.
+    """
+
+    EXP_CLAMP = 20.0
+
+    def __init__(self, n_in, n_out, dim=None, sum_bias_init=0.0,
+                 path_affine=True):
+        super().__init__()
+        self.linear = nn.Linear(n_in, n_out, bias=True)
+
+        self.in_scale = nn.Parameter(torch.ones(n_in))
+        self.in_shift = nn.Parameter(torch.zeros(n_in))
+
+        mix = torch.zeros(n_out, 3)
+        mix[:, 0] = sum_bias_init
+        self.mix_logits = nn.Parameter(mix)                 # [n_out, 3]
+
+        self.path_affine = path_affine
+        if path_affine:
+            self.and_scale = nn.Parameter(torch.ones(n_out))
+            self.and_shift = nn.Parameter(torch.zeros(n_out))
+            self.or_scale = nn.Parameter(torch.ones(n_out))
+            self.or_shift = nn.Parameter(torch.zeros(n_out))
+
+    def forward(self, x):
+        n = x.shape[-1]
+        u = self.in_scale * x + self.in_shift               # [B, n_in]
+        log_p = F.logsigmoid(u) / n                         # log p, pre-scaled
+        log_q = F.logsigmoid(-u) / n                        # log(1 - p)
+
+        # One matmul for all three paths (shared W, stacked along dim 0).
+        stacked = torch.stack([x, log_p, log_q], 0)         # [3, B, n_in]
+        h = F.linear(stacked, self.linear.weight)           # [3, B, n_out]
+
+        s_sum = h[0] + self.linear.bias
+        s_and = torch.exp(h[1].clamp(max=self.EXP_CLAMP))
+        s_or = 1 - torch.exp(h[2].clamp(max=self.EXP_CLAMP))
+
+        if self.path_affine:
+            s_and = self.and_scale * s_and + self.and_shift
+            s_or = self.or_scale * s_or + self.or_shift
+
+        gate = F.softmax(self.mix_logits, dim=-1)           # [n_out, 3]
+        return gate[:, 0] * s_sum + gate[:, 1] * s_and + gate[:, 2] * s_or
+
+    def gate_distribution(self):
+        """Per-neuron softmax gate, detached: [n_out, 3] = (SUM, AND, OR)."""
+        return F.softmax(self.mix_logits, dim=-1).detach()
+
+
+class MGNv2Net(nn.Module):
+    """Full model over MGNv2Linear layers; interface identical to MGNNet."""
+
+    def __init__(self, in_features, hidden, num_classes, dim=None, **kw):
+        super().__init__()
+        widths = [in_features] + list(hidden)
+        self.layers = nn.ModuleList(
+            MGNv2Linear(a, b, dim, **kw)
+            for a, b in zip(widths[:-1], widths[1:]))
+        self.head = nn.Linear(widths[-1], num_classes)
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = F.relu(layer(x))
+        return self.head(x)
+
+    def gate_distributions(self):
+        """List of per-layer gate tensors [n_out, 3], for histograms."""
+        return [layer.gate_distribution() for layer in self.layers]

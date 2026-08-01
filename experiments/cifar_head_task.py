@@ -29,9 +29,13 @@ instead of its params).
 Round 4 (`... 4`) tests the multi-gate neuron (MGN, see mgn.py) against a
 param-matched plain MLP:
 
-    mgn   MGNNet head: per-neuron learned softmax mix of SUM/AND/OR
-          reductions over the same weighted inputs
-    mlp   param-matched plain MLP head (same target as round 1)
+    mgn    MGNNet head: per-neuron learned softmax mix of SUM/AND/OR
+           reductions over the same weighted inputs (v1: per-synapse
+           sigmoid(w*x) truth values, [B, n_out, n_in] expansion)
+    mgnv2  MGNv2Net head: matmul-native rewrite — squash applied to the
+           input before weighting so every path is one plain matmul with
+           the shared weight matrix, no per-synapse expansion
+    mlp    param-matched plain MLP head (same target as round 1)
 
 Sample-efficiency sweep across train sizes, 5 seeds, vmap-stacked like the
 MNIST grids. Run experiments/cifar_features.py once first.
@@ -49,7 +53,7 @@ import torch
 from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
                         matched_mlp_width, matched_width, proj_flops,
                         matched_mlp_flops)
-from mgn import MGNNet
+from mgn import MGNNet, MGNv2Net
 from experiments.mnist_grid import (balanced_subset, make_models, train_stack,
                                     eval_stack)
 
@@ -167,12 +171,14 @@ def main():
                          tx, ex, ex_rot),
         }
     else:
-        # round 4 — multi-gate neuron (MGN) vs param-matched plain MLP.
+        # round 4 — multi-gate neuron (MGN v1 and v2) vs param-matched plain MLP.
         mlp_w, mlp_par = matched_mlp_width(target, FEAT, 10, len(HIDDEN))
         print(f'round 4: mgn target {target:,} | mlp width {mlp_w}, '
               f'{mlp_par:,} params', flush=True)
         arms = {
             'mgn': (new_arm('mgn', lambda w: MGNNet(
+                        FEAT, [w] * len(HIDDEN), 10)), tx, ex, ex_rot),
+            'mgnv2': (new_arm('mgnv2', lambda w: MGNv2Net(
                         FEAT, [w] * len(HIDDEN), 10)), tx, ex, ex_rot),
             'mlp': (lambda: PlainMLP(FEAT, [mlp_w] * len(HIDDEN), 10),
                     tx, ex, ex_rot),
