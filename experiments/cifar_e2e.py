@@ -60,6 +60,7 @@ from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
 from mgn import MGNNet, MGNv4Net
 from dendritic_linear import DendriticLinear
 from staged_linear import StagedMLP
+from swiglu import SwiGLU
 from experiments.mnist_grid import balanced_subset, train_stack, eval_stack
 from experiments.cifar_features import rotated  # also patches the HF mirror
 
@@ -235,14 +236,13 @@ def main():
                                nn.Linear(DEND_OUT, 10))),
         }
     else:
-        # round 6 — StagedLinear heads (extra_stages = 1, 2, 4: each neuron
-        # gets 1/2/4 extra learned scale-shift-leaky_relu bends on top of the
-        # base Linear+leaky_relu) vs param-matched plain MLP. 2 hidden layers
-        # (same depth as HEAD_HIDDEN), width found per-arm via matched_width
-        # since each extra_stages setting adds a slightly different (tiny)
-        # per-neuron param cost on top of the same matmul. Final classifier
-        # is a bare nn.Linear in every arm — StagedLinear always leaky_relus
-        # internally, which would clip logits if used as the last layer.
+        # round 6 — StagedLinear head (extra_stages=1: each neuron gets one
+        # extra learned scale-shift-leaky_relu bend on top of the base
+        # Linear+leaky_relu) vs param-matched plain MLP. 2 hidden layers
+        # (same depth as HEAD_HIDDEN), width found via matched_width since
+        # extra_stages adds a tiny per-neuron param cost on top of the same
+        # matmul. Final classifier is a bare nn.Linear — StagedLinear always
+        # leaky_relus internally, which would clip logits if used last.
         mlp_w, mlp_par = matched_mlp_width(head_target, 2048, 10, len(HEAD_HIDDEN))
         print(f'round 6: staged-linear head target {head_target:,} | '
               f'mlp head width {mlp_w}, {mlp_par:,} params', flush=True)
@@ -253,10 +253,13 @@ def main():
             return lambda: E2E(build(w))
 
         arms = {
-            f'cnn-staged{n}': new_arm(f'staged{n}', lambda w, n=n: StagedMLP(
-                           2048, [w] * len(HEAD_HIDDEN), 10, extra_stages=n))
-            for n in (1, 2, 4)
+            'cnn-staged1': new_arm('staged1', lambda w: StagedMLP(
+                           2048, [w] * len(HEAD_HIDDEN), 10, extra_stages=1)),
         }
+        # SwiGLU gated FFN block, single param-matched stand-in for the
+        # whole head (same convention as DendriticLinear in round 5), not
+        # stacked to HEAD_HIDDEN's depth.
+        arms['cnn-swiglu'] = new_arm('swiglu', lambda w: SwiGLU(2048, w, 10))
         arms['cnn-mlp'] = lambda: E2E(
                                PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10))
 
