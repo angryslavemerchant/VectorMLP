@@ -247,8 +247,8 @@ def main():
         print(f'round 6: staged-linear head target {head_target:,} | '
               f'mlp head width {mlp_w}, {mlp_par:,} params', flush=True)
 
-        def new_arm(name, build):
-            w, got = matched_width(head_target, build)
+        def new_arm(name, build, target=head_target):
+            w, got = matched_width(target, build)
             print(f'{name}: head width {w}, {got:,} params', flush=True)
             return lambda: E2E(build(w))
 
@@ -258,8 +258,12 @@ def main():
         }
         # SwiGLU gated FFN block, single param-matched stand-in for the
         # whole head (same convention as DendriticLinear in round 5), not
-        # stacked to HEAD_HIDDEN's depth.
-        arms['cnn-swiglu'] = new_arm('swiglu', lambda w: SwiGLU(2048, w, 10))
+        # stacked to HEAD_HIDDEN's depth. Given its own, larger param budget
+        # (rather than head_target) so its gate/up width lands at ~100
+        # instead of the ~8 that head_target's budget would give it.
+        swiglu_target = count_params(SwiGLU(2048, 100, 10))
+        arms['cnn-swiglu'] = new_arm('swiglu', lambda w: SwiGLU(2048, w, 10),
+                                      target=swiglu_target)
         arms['cnn-mlp'] = lambda: E2E(
                                PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10))
 
