@@ -29,6 +29,8 @@ param-matched plain MLP head, same trainable backbone:
     cnn-mgn    MGNNet head (per-neuron learned SUM/AND/OR softmax mix,
                v1: per-synapse expansion)
     cnn-mgnv2  MGNv2Net head (matmul-native rewrite of the same idea)
+    cnn-mgnv3  MGNv3Net head (matmul-native, fan-in robust soft-max/
+               soft-min AND/OR)
     cnn-mlp    param-matched plain MLP head (same target as round 1)
 
 Sizes x 5 seeds, vmap-stacked. Heavier than the head-only grids (conv
@@ -50,7 +52,7 @@ from torchvision.datasets import CIFAR10
 from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
                         matched_mlp_width, matched_width, proj_flops,
                         matched_mlp_flops)
-from mgn import MGNNet, MGNv2Net
+from mgn import MGNNet, MGNv2Net, MGNv3Net
 from experiments.mnist_grid import balanced_subset, train_stack, eval_stack
 from experiments.cifar_features import rotated  # also patches the HF mirror
 
@@ -178,7 +180,7 @@ def main():
                 PlainMLP(2048, [fw] * len(HEAD_HIDDEN), 10)),
         }
     else:
-        # round 4 — multi-gate neuron (MGN v1 and v2) heads vs param-matched
+        # round 4 — multi-gate neuron (MGN v1/v2/v3) heads vs param-matched
         # plain MLP.
         mlp_w, mlp_par = matched_mlp_width(head_target, 2048, 10, len(HEAD_HIDDEN))
         print(f'round 4: mgn head target {head_target:,} | mlp head width '
@@ -193,6 +195,8 @@ def main():
             'cnn-mgn': new_arm('mgn', lambda w: MGNNet(
                            2048, [w] * len(HEAD_HIDDEN), 10)),
             'cnn-mgnv2': new_arm('mgnv2', lambda w: MGNv2Net(
+                           2048, [w] * len(HEAD_HIDDEN), 10)),
+            'cnn-mgnv3': new_arm('mgnv3', lambda w: MGNv3Net(
                            2048, [w] * len(HEAD_HIDDEN), 10)),
             'cnn-mlp': lambda: E2E(
                            PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10)),
