@@ -58,6 +58,7 @@ from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
                         matched_mlp_width, matched_width, proj_flops,
                         matched_mlp_flops)
 from mgn import MGNNet, MGNv4Net
+from dendritic_linear import DendriticLinear
 from experiments.mnist_grid import balanced_subset, train_stack, eval_stack
 from experiments.cifar_features import rotated  # also patches the HF mirror
 
@@ -184,7 +185,7 @@ def main():
             'cnn-mlp-flop': lambda: E2E(
                 PlainMLP(2048, [fw] * len(HEAD_HIDDEN), 10)),
         }
-    else:
+    elif ROUND == 4:
         # round 4 — multi-gate neuron (MGN v1 and v4) heads vs param-matched
         # plain MLP.
         mlp_w, mlp_par = matched_mlp_width(head_target, 2048, 10, len(HEAD_HIDDEN))
@@ -203,6 +204,24 @@ def main():
                            2048, [w] * len(HEAD_HIDDEN), 10, 2)),
             'cnn-mlp': lambda: E2E(
                            PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10)),
+        }
+    else:
+        # round 5 — a single DendriticLinear as the whole head (its internal
+        # dendrite stage already plays the role of a hidden layer), in and
+        # out matched to the backbone/classes: 2048 -> 10, fan_in K=16,
+        # coverage=2 (each soma's dendrites collectively tile the 2048
+        # inputs twice). Compared against the shape-matched dense MLP the
+        # layer's own docstring describes: Linear(2048, M) -> ReLU ->
+        # Linear(M, 10), M = out_features * D dendrites.
+        dend = DendriticLinear(2048, 10, fan_in=16, coverage=2)
+        mlp = PlainMLP(2048, [dend.M], 10)
+        print(f'round 5: dendritic head {count_params(dend):,} params '
+              f'(K={dend.K}, D={dend.D}, M={dend.M}) | '
+              f'shape-matched mlp head {count_params(mlp):,} params', flush=True)
+        arms = {
+            'cnn-dendritic': lambda: E2E(
+                               DendriticLinear(2048, 10, fan_in=16, coverage=2)),
+            'cnn-mlp-matched': lambda: E2E(PlainMLP(2048, [dend.M], 10)),
         }
 
     results = {}
