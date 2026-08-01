@@ -57,13 +57,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import torch
-import torch.nn as nn
 
 from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
                         matched_mlp_width, matched_width, proj_flops,
                         matched_mlp_flops)
 from mgn import MGNNet, MGNv4Net
-from dendritic_linear import DendriticLinear
 from staged_linear import StagedMLP
 from branched_linear import BranchedMLP
 from neighbor_linear import NeighborMLP
@@ -203,27 +201,17 @@ def main():
         # convention, unlike cifar_e2e's later hardcoded-256/torch.compile
         # rounds 7-8) for consistency with rounds 1-4. MGN already has its
         # own round above, so this covers what's left:
-        #   dendritic  single DendriticLinear (fan_in K=16, coverage=2) as
-        #              the whole head, matched by its own out_features w,
-        #              followed by a bare Linear(w, 10) classifier
         #   staged1/2/4, branched1/2/4, neighbor1/2/4
         #              StagedMLP / BranchedMLP / NeighborMLP, their
         #              respective variable swept at 1/2/4 (neighbor needs
         #              min_w=n: NeighborLinear requires out_features>=n)
         #   swiglu     SwiGLUMLP, stacked gated blocks
         #   mlp        param-matched plain MLP (same target as round 1)
-        DEND_KW = dict(fan_in=16, coverage=2)
-
-        def build_dend(w):
-            return nn.Sequential(DendriticLinear(FEAT, w, **DEND_KW),
-                                  nn.Linear(w, 10))
-
         mlp_w, mlp_par = matched_mlp_width(target, FEAT, 10, len(HIDDEN))
         print(f'round 5: target {target:,} | mlp width {mlp_w}, '
               f'{mlp_par:,} params', flush=True)
 
         arms = {
-            'dendritic': (new_arm('dendritic', build_dend), tx, ex, ex_rot),
             'swiglu': (new_arm('swiglu', lambda w: SwiGLUMLP(
                            FEAT, [w] * len(HIDDEN), 10)), tx, ex, ex_rot),
             'mlp': (lambda: PlainMLP(FEAT, [mlp_w] * len(HIDDEN), 10),
