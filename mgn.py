@@ -371,3 +371,107 @@ class MGNv3Net(nn.Module):
     def gate_distributions(self):
         """List of per-layer gate tensors [n_out, 3], for histograms."""
         return [layer.gate_distribution() for layer in self.layers]
+
+
+class MGNv4Linear(nn.Module):
+    """Project-then-reduce multi-gate layer: [B, n_in] -> [B, n_out].
+
+    v1-v3 reduce over the n_in inputs, which forces a choice between a
+    [B, n_out, n_in] expansion (v1, exact but expensive) and keeping the
+    weights outside the nonlinearity (v2/v3, matmul-native but weaker), and
+    makes the AND/OR reductions degrade as fan-in grows.
+
+    v4 sidesteps both: each neuron first projects the input down to k
+    learned features with a plain matmul, then reduces over those k.
+
+        s_sum = W_sum @ x + b                       [B, n_out]
+        z     = W_proj @ x + c  -> [B, n_out, k]    k features per neuron
+        s_and = exp(mean_k logsigmoid(z))           geometric mean over k
+        s_or  = logsumexp_k(tau * z) / tau          smooth max over k
+
+    Because the nonlinearity is applied AFTER the matmul, nothing expands:
+    W_proj is one [n_out*k, n_in] matmul. And because the reduction runs
+    over k (small) rather than n_in (large), AND/OR keep their
+    discrimination at any layer width -- the fan-in decay that breaks v1's
+    AND and v2's OR simply does not apply.
+
+    The semantics shift from "all/any of my inputs" to "all/any of my k
+    learned conditions", which is strictly more expressive per unit of
+    compute. The OR path alone is essentially maxout; the gated AND/OR
+    mixture is the new part. tau can be per-neuron here (it multiplies z
+    after the matmul, so it costs nothing).
+
+    k defaults to `dim` (the harness's shared width hyperparameter) so arms
+    compare apples-to-apples, or 2 if dim is None.
+
+    Cost: 1 + k matmul units vs a plain linear layer's 1, and (1+k)x the
+    parameters -- so in a param-matched comparison the layer is narrower.
+    """
+
+    def __init__(self, n_in, n_out, dim=None, k=None, tau_init=5.0,
+                 sum_bias_init=0.0, path_affine=True):
+        super().__init__()
+        self.k = k if k is not None else (dim if dim else 2)
+        self.n_out = n_out
+
+        self.linear = nn.Linear(n_in, n_out, bias=True)          # SUM path
+        # shared projection bank read by BOTH the AND and OR reductions
+        self.proj = nn.Linear(n_in, n_out * self.k, bias=True)
+
+        self.log_tau = nn.Parameter(
+            torch.full((n_out,), math.log(tau_init)))
+
+        mix = torch.zeros(n_out, 3)
+        mix[:, 0] = sum_bias_init
+        self.mix_logits = nn.Parameter(mix)                      # [n_out, 3]
+
+        self.path_affine = path_affine
+        if path_affine:
+            self.and_scale = nn.Parameter(torch.ones(n_out))
+            self.and_shift = nn.Parameter(torch.zeros(n_out))
+            self.or_scale = nn.Parameter(torch.ones(n_out))
+            self.or_shift = nn.Parameter(torch.zeros(n_out))
+
+    def forward(self, x):
+        s_sum = self.linear(x)                                   # [B, n_out]
+        z = self.proj(x).unflatten(-1, (self.n_out, self.k))     # [B, out, k]
+
+        s_and = torch.exp(F.logsigmoid(z).mean(-1))              # [B, n_out]
+        tau = self.log_tau.exp().unsqueeze(-1)                   # [n_out, 1]
+        s_or = torch.logsumexp(tau * z, -1) / tau.squeeze(-1)
+
+        if self.path_affine:
+            s_and = self.and_scale * s_and + self.and_shift
+            s_or = self.or_scale * s_or + self.or_shift
+
+        gate = F.softmax(self.mix_logits, dim=-1)                # [n_out, 3]
+        return gate[:, 0] * s_sum + gate[:, 1] * s_and + gate[:, 2] * s_or
+
+    def gate_distribution(self):
+        """Per-neuron softmax gate, detached: [n_out, 3] = (SUM, AND, OR)."""
+        return F.softmax(self.mix_logits, dim=-1).detach()
+
+
+class MGNv4Net(nn.Module):
+    """Full model over MGNv4Linear layers; interface identical to MGNNet.
+
+    `dim` is used here (unlike v1-v3): it sets k, the number of learned
+    features each neuron reduces over.
+    """
+
+    def __init__(self, in_features, hidden, num_classes, dim=None, **kw):
+        super().__init__()
+        widths = [in_features] + list(hidden)
+        self.layers = nn.ModuleList(
+            MGNv4Linear(a, b, dim, **kw)
+            for a, b in zip(widths[:-1], widths[1:]))
+        self.head = nn.Linear(widths[-1], num_classes)
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = F.relu(layer(x))
+        return self.head(x)
+
+    def gate_distributions(self):
+        """List of per-layer gate tensors [n_out, 3], for histograms."""
+        return [layer.gate_distribution() for layer in self.layers]
