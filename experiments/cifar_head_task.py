@@ -57,11 +57,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import torch
+import torch.nn as nn
 
 from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
                         matched_mlp_width, matched_width, proj_flops,
                         matched_mlp_flops)
 from mgn import MGNNet, MGNv4Net
+from dendritic_linear import DendriticLinear
+from staged_linear import StagedMLP
+from branched_linear import BranchedMLP
+from neighbor_linear import NeighborMLP
+from swiglu import SwiGLUMLP
 from experiments.mnist_grid import (balanced_subset, make_models, train_stack,
                                     eval_stack)
 
@@ -98,9 +104,9 @@ def main():
 
     target = count_params(vec_head())
 
-    def new_arm(name, build):
+    def new_arm(name, build, min_w=1):
         """Width-match `build(w)` to the round-1 vec-head param target."""
-        w, got = matched_width(target, build)
+        w, got = matched_width(target, build, min_w=min_w)
         print(f'{name}: width {w}, {got:,} params', flush=True)
         return lambda: build(w)
 
@@ -178,7 +184,7 @@ def main():
             'mlp-flop': (lambda: PlainMLP(FEAT, [fw] * len(HIDDEN), 10),
                          tx, ex, ex_rot),
         }
-    else:
+    elif ROUND == 4:
         # round 4 — multi-gate neuron (MGN v1 and v4) vs param-matched plain MLP.
         mlp_w, mlp_par = matched_mlp_width(target, FEAT, 10, len(HIDDEN))
         print(f'round 4: mgn target {target:,} | mlp width {mlp_w}, '
@@ -191,6 +197,52 @@ def main():
             'mlp': (lambda: PlainMLP(FEAT, [mlp_w] * len(HIDDEN), 10),
                     tx, ex, ex_rot),
         }
+    else:
+        # round 5 — the newer per-layer architectures from the CIFAR e2e
+        # rounds (5-8), all width-matched to `target` here (this file's own
+        # convention, unlike cifar_e2e's later hardcoded-256/torch.compile
+        # rounds 7-8) for consistency with rounds 1-4. MGN already has its
+        # own round above, so this covers what's left:
+        #   dendritic  single DendriticLinear (fan_in K=16, coverage=2) as
+        #              the whole head, matched by its own out_features w,
+        #              followed by a bare Linear(w, 10) classifier
+        #   staged1/2/4, branched1/2/4, neighbor1/2/4
+        #              StagedMLP / BranchedMLP / NeighborMLP, their
+        #              respective variable swept at 1/2/4 (neighbor needs
+        #              min_w=n: NeighborLinear requires out_features>=n)
+        #   swiglu     SwiGLUMLP, stacked gated blocks
+        #   mlp        param-matched plain MLP (same target as round 1)
+        DEND_KW = dict(fan_in=16, coverage=2)
+
+        def build_dend(w):
+            return nn.Sequential(DendriticLinear(FEAT, w, **DEND_KW),
+                                  nn.Linear(w, 10))
+
+        mlp_w, mlp_par = matched_mlp_width(target, FEAT, 10, len(HIDDEN))
+        print(f'round 5: target {target:,} | mlp width {mlp_w}, '
+              f'{mlp_par:,} params', flush=True)
+
+        arms = {
+            'dendritic': (new_arm('dendritic', build_dend), tx, ex, ex_rot),
+            'swiglu': (new_arm('swiglu', lambda w: SwiGLUMLP(
+                           FEAT, [w] * len(HIDDEN), 10)), tx, ex, ex_rot),
+            'mlp': (lambda: PlainMLP(FEAT, [mlp_w] * len(HIDDEN), 10),
+                    tx, ex, ex_rot),
+        }
+        for n in (1, 2, 4):
+            arms[f'staged{n}'] = (new_arm(
+                f'staged{n}', lambda w, n=n: StagedMLP(
+                    FEAT, [w] * len(HIDDEN), 10, extra_stages=n)),
+                tx, ex, ex_rot)
+            arms[f'branched{n}'] = (new_arm(
+                f'branched{n}', lambda w, n=n: BranchedMLP(
+                    FEAT, [w] * len(HIDDEN), 10, extra_branches=n)),
+                tx, ex, ex_rot)
+            arms[f'neighbor{n}'] = (new_arm(
+                f'neighbor{n}', lambda w, n=n: NeighborMLP(
+                    FEAT, [w] * len(HIDDEN), 10, neighbors=n),
+                min_w=n),
+                tx, ex, ex_rot)
 
     results = {}
     for name, (factory, atx, aex, aex_rot) in arms.items():
