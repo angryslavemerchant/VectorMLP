@@ -21,6 +21,11 @@ param-matched to the same round-1 vec-head target:
     tagq-d4            Variant B TagNet 'query': shared layer field, per-
                        neuron query direction picks the agreement axis
 
+Round 3 (`... 3`) asks what part of ProjNet is doing the work: proj-d1
+(geometry control — collapses to a scalar net with a |z|-style activation),
+projI-d4 (P frozen to identity), mlp-flop (MLP matched to proj-d2's FLOPs
+instead of its params).
+
 Sample-efficiency sweep across train sizes, 5 seeds, vmap-stacked like the
 MNIST grids. Run experiments/cifar_features.py once first.
 """
@@ -35,7 +40,8 @@ sys.path.insert(0, str(ROOT))
 import torch
 
 from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
-                        matched_mlp_width, matched_width)
+                        matched_mlp_width, matched_width, proj_flops,
+                        matched_mlp_flops)
 from experiments.mnist_grid import (balanced_subset, make_models, train_stack,
                                     eval_stack)
 
@@ -111,7 +117,7 @@ def main():
             'vec-none':   (abl_head('none'), tx, ex, ex_rot),
             'vec-ring':   (abl_head('ring', kernel_size=5), tx, ex, ex_rot),
         }
-    else:
+    elif ROUND == 2:
         print(f'round 2: matching new-neuron arms to {target:,} params', flush=True)
         arms = {
             name: (new_arm(name, build), tx, ex, ex_rot)
@@ -123,6 +129,35 @@ def main():
                 'tagq-d4': lambda w: TagNet(FEAT, [w] * len(HIDDEN), 10, 4,
                                             mode='query'),
             }.items()}
+    else:
+        # round 3 — is ProjNet real, and what part of it is doing the work?
+        #   proj-d1   geometry control: at D=1 the net collapses to a scalar
+        #             MLP with activation ReLU(|z|+b)*sign(z). If this
+        #             matches proj-d2/d4, the win is the activation, not the
+        #             vector geometry.
+        #   projI-d4  P frozen to identity: gate = ||sum w_i x_i|| raw.
+        #             Does the learned projection matter, or is interference
+        #             over on-ramp directions alone enough?
+        #   mlp-flop  FLOP-matched MLP (compute of round-2 proj-d2, params
+        #             unconstrained). Kills the "it's just 2x compute"
+        #             objection — the control owed since MNIST round 1.
+        w2, _ = matched_width(target,
+                              lambda w: ProjNet(FEAT, [w] * len(HIDDEN), 10, 2))
+        flop_target = proj_flops(FEAT, [w2] * len(HIDDEN), 10, 2)
+        fw, ff = matched_mlp_flops(flop_target, FEAT, 10, len(HIDDEN))
+        fpar = count_params(PlainMLP(FEAT, [fw] * len(HIDDEN), 10))
+        print(f'round 3: param target {target:,} | flop target {flop_target:,} '
+              f'(proj-d2 w{w2}) -> mlp-flop width {fw}, {ff:,} flops, '
+              f'{fpar:,} params', flush=True)
+        arms = {
+            'proj-d1':  (new_arm('proj-d1', lambda w: ProjNet(
+                             FEAT, [w] * len(HIDDEN), 10, 1)), tx, ex, ex_rot),
+            'projI-d4': (new_arm('projI-d4', lambda w: ProjNet(
+                             FEAT, [w] * len(HIDDEN), 10, 4,
+                             learn_proj=False)), tx, ex, ex_rot),
+            'mlp-flop': (lambda: PlainMLP(FEAT, [fw] * len(HIDDEN), 10),
+                         tx, ex, ex_rot),
+        }
 
     results = {}
     for name, (factory, atx, aex, aex_rot) in arms.items():

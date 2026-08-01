@@ -314,8 +314,15 @@ neuron's remaining unique win is the MNIST pixel regime.
 
 ## Queue
 
-- FLOP-matched MLP control for exp 2 (and now for proj-d4 e2e, where the
-  width-11 squeeze makes FLOP-matching bite in the other direction).
+- **Round 3 built, awaiting box run** (`cifar_head_task.py 3`,
+  `cifar_e2e.py 3`): what part of ProjNet is doing the work? proj-d1
+  (geometry control: D=1 collapses to a scalar net with a thresholded
+  |z|-style activation — if it matches d2/d4, the win is the activation,
+  not the geometry), projI-d4 (P frozen to identity: is the learned
+  projection needed?), mlp-flop (MLP at proj-d2's FLOPs, ~1.9x params:
+  head width 100 vs 57; e2e head width 27 vs 15 — kills the "just more
+  compute" objection). e2e round 3 also adds cnn-proj-d2 as the missing
+  D ablation / FLOP reference.
 - TagNet e2e instability: warmup or gain clamp if we ever need B in a
   trainable host.
 - Rot45 gap vs rotation angle; pose linear probe (why is matrix robust?).

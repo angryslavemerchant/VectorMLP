@@ -200,16 +200,21 @@ class ProjLinear(nn.Module):
     destructive interference of input directions.
     """
 
-    def __init__(self, n_in, n_out, dim, bias_init=-0.1):
+    def __init__(self, n_in, n_out, dim, bias_init=-0.1, learn_proj=True):
         super().__init__()
         self.weight = nn.Parameter(torch.randn(n_out, n_in) / math.sqrt(n_in))
-        eye = torch.eye(dim).expand(n_out, dim, dim)
-        self.proj = nn.Parameter(eye + 0.01 * torch.randn(n_out, dim, dim))
+        if learn_proj:
+            eye = torch.eye(dim).expand(n_out, dim, dim)
+            self.proj = nn.Parameter(eye + 0.01 * torch.randn(n_out, dim, dim))
+        else:
+            # ablation: P frozen to identity — the gate is the raw ||sum w_i x_i||,
+            # interference over on-ramp directions with no learned reshaping
+            self.proj = None
         self.bias = nn.Parameter(torch.full((n_out,), float(bias_init)))
 
     def forward(self, x):
         v = torch.einsum('oi,bid->bod', self.weight, x)
-        r = torch.einsum('odc,boc->bod', self.proj, v)
+        r = v if self.proj is None else torch.einsum('odc,boc->bod', self.proj, v)
         n = torch.sqrt((r * r).sum(-1) + 1e-12)          # [B, n_out]
         a = F.relu(n + self.bias)
         return (a / (n + 1e-6)).unsqueeze(-1) * r
@@ -225,14 +230,15 @@ class ProjNet(nn.Module):
               spec's per-class direction dot as a special case).
     """
 
-    def __init__(self, in_features, hidden, num_classes, dim, bias_init=-0.1):
+    def __init__(self, in_features, hidden, num_classes, dim, bias_init=-0.1,
+                 learn_proj=True):
         super().__init__()
         self.dim = dim
         self.dirs = nn.Parameter(
             F.normalize(torch.randn(in_features, dim), dim=-1))
         widths = [in_features] + list(hidden)
         self.layers = nn.ModuleList(
-            ProjLinear(a, b, dim, bias_init=bias_init)
+            ProjLinear(a, b, dim, bias_init=bias_init, learn_proj=learn_proj)
             for a, b in zip(widths[:-1], widths[1:]))
         self.head = nn.Linear(widths[-1] * dim, num_classes)
 
@@ -344,6 +350,39 @@ def matched_mlp_width(target_params, in_features, num_classes, depth):
         else:
             hi = mid
     return lo, n_params(lo)
+
+
+def proj_flops(in_features, hidden, num_classes, dim):
+    """Per-sample multiply count for a ProjNet: each scalar weight multiplies
+    a D-vector, so FLOPs ~ params x D (plus the DxD projections)."""
+    widths = [in_features] + list(hidden)
+    f = in_features * dim                                  # on-ramp
+    for a, b in zip(widths[:-1], widths[1:]):
+        f += b * a * dim + b * dim * dim                   # weights + P
+    return f + hidden[-1] * dim * num_classes              # head
+
+
+def mlp_flops(in_features, hidden, num_classes):
+    widths = [in_features] + list(hidden) + [num_classes]
+    return sum(a * b for a, b in zip(widths[:-1], widths[1:]))
+
+
+def matched_mlp_flops(target_flops, in_features, num_classes, depth):
+    """Widest uniform-width MLP whose per-sample FLOPs do not exceed
+    target_flops. Returns (width, flops). The FLOP-matched control: same
+    compute, params be damned."""
+    lo, hi = 1, 1
+    def f(w):
+        return mlp_flops(in_features, [w] * depth, num_classes)
+    while f(hi) <= target_flops:
+        hi *= 2
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if f(mid) <= target_flops:
+            lo = mid
+        else:
+            hi = mid
+    return lo, f(lo)
 
 
 def matched_width(target_params, build):

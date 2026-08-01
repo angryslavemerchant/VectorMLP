@@ -19,6 +19,10 @@ the round-1 vec head:
     cnn-tagw-d4   TagNet 'weighted' head (Variant B, agreement over weights)
     cnn-tagq-d4   TagNet 'query' head (Variant B, per-neuron query direction)
 
+Round 3 (`... 3`): ProjNet controls — cnn-proj-d2, cnn-proj-d1 (geometry
+control), cnn-projI-d4 (P frozen to identity), cnn-mlp-flop (head matched
+to cnn-proj-d2's head FLOPs, params unconstrained).
+
 Sizes x 5 seeds, vmap-stacked. Heavier than the head-only grids (conv
 activations for 15 stacked models) — meant for a box, not the laptop.
 """
@@ -36,7 +40,8 @@ import torch.nn as nn
 from torchvision.datasets import CIFAR10
 
 from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
-                        matched_mlp_width, matched_width)
+                        matched_mlp_width, matched_width, proj_flops,
+                        matched_mlp_flops)
 from experiments.mnist_grid import balanced_subset, train_stack, eval_stack
 from experiments.cifar_features import rotated  # also patches the HF mirror
 
@@ -116,7 +121,7 @@ def main():
             'cnn-vec': lambda: E2E(vec_head()),
             'cnn-mlp': lambda: E2E(PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10)),
         }
-    else:
+    elif ROUND == 2:
         print(f'round 2: matching new-neuron heads to {head_target:,} params',
               flush=True)
 
@@ -134,6 +139,35 @@ def main():
                 'tagq-d4': lambda w: TagNet(2048, [w] * len(HEAD_HIDDEN), 10, 4,
                                             mode='query'),
             }.items()}
+    else:
+        # round 3 — ProjNet controls (see cifar_head_task.py round 3).
+        # cnn-proj-d2 wasn't in round 2, so it runs here both as the D
+        # ablation and as the FLOP reference for cnn-mlp-flop. The FLOP
+        # match is head-only (backbones are identical).
+        def new_arm(name, build):
+            w, got = matched_width(head_target, build)
+            print(f'{name}: head width {w}, {got:,} params', flush=True)
+            return lambda: E2E(build(w))
+
+        w2, _ = matched_width(head_target, lambda w: ProjNet(
+            2048, [w] * len(HEAD_HIDDEN), 10, 2))
+        flop_target = proj_flops(2048, [w2] * len(HEAD_HIDDEN), 10, 2)
+        fw, ff = matched_mlp_flops(flop_target, 2048, 10, len(HEAD_HIDDEN))
+        fpar = count_params(PlainMLP(2048, [fw] * len(HEAD_HIDDEN), 10))
+        print(f'round 3: head flop target {flop_target:,} (proj-d2 w{w2}) -> '
+              f'mlp-flop head width {fw}, {ff:,} flops, {fpar:,} params',
+              flush=True)
+        arms = {
+            'cnn-proj-d2':  new_arm('proj-d2', lambda w: ProjNet(
+                                2048, [w] * len(HEAD_HIDDEN), 10, 2)),
+            'cnn-proj-d1':  new_arm('proj-d1', lambda w: ProjNet(
+                                2048, [w] * len(HEAD_HIDDEN), 10, 1)),
+            'cnn-projI-d4': new_arm('projI-d4', lambda w: ProjNet(
+                                2048, [w] * len(HEAD_HIDDEN), 10, 4,
+                                learn_proj=False)),
+            'cnn-mlp-flop': lambda: E2E(
+                PlainMLP(2048, [fw] * len(HEAD_HIDDEN), 10)),
+        }
 
     results = {}
     for name, factory in arms.items():
