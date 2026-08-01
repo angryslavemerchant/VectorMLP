@@ -385,10 +385,13 @@ def matched_mlp_flops(target_flops, in_features, num_classes, depth):
     return lo, f(lo)
 
 
-def matched_width(target_params, build):
+def matched_width(target_params, build, min_w=1):
     """Widest uniform hidden width w such that build(w) has at most
-    target_params parameters. build: int -> nn.Module. Returns (w, params)."""
-    lo, hi = 1, 1
+    target_params parameters. build: int -> nn.Module. Returns (w, params).
+
+    min_w raises the search floor for builds that reject widths below some
+    threshold (e.g. NeighborLinear requires out_features >= neighbors)."""
+    lo, hi = min_w, min_w
     def n_params(w):
         return count_params(build(w))
     while n_params(hi) <= target_params:

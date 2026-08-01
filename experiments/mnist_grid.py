@@ -112,7 +112,7 @@ def make_models(factory):
     return models
 
 
-def train_stack(models, subsets, tx, ty):
+def train_stack(models, subsets, tx, ty, compile=False):
     """Train len(models) models in lockstep; subsets[i] indexes tx for model i."""
     models = [m.to(DEVICE) for m in models]
     params, buffers = stack_module_state(models)
@@ -125,6 +125,8 @@ def train_stack(models, subsets, tx, ty):
         return F.cross_entropy(functional_call(base, (p, b), (x,)), y)
 
     grad_fn = vmap(grad(loss_fn), in_dims=(0, 0, 0, 0))
+    if compile:
+        grad_fn = torch.compile(grad_fn)
     tx, ty = tx.to(DEVICE), ty.to(DEVICE)
     subsets = [s.to(DEVICE) for s in subsets]
     gen = torch.Generator(device='cpu').manual_seed(7)
@@ -140,9 +142,11 @@ def train_stack(models, subsets, tx, ty):
 
 
 @torch.no_grad()
-def eval_stack(params, buffers, base, ex, ey, chunk=1000):
+def eval_stack(params, buffers, base, ex, ey, chunk=1000, compile=False):
     fwd = vmap(lambda p, b, x: functional_call(base, (p, b), (x,)),
                in_dims=(0, 0, None))
+    if compile:
+        fwd = torch.compile(fwd)
     ex, ey = ex.to(DEVICE), ey.to(DEVICE)
     correct = None
     for i in range(0, ex.shape[0], chunk):

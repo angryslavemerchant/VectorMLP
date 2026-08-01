@@ -61,6 +61,8 @@ from mgn import MGNNet, MGNv4Net
 from dendritic_linear import DendriticLinear
 from staged_linear import StagedMLP
 from swiglu import SwiGLU
+from branched_linear import BranchedMLP
+from neighbor_linear import NeighborMLP
 from experiments.mnist_grid import balanced_subset, train_stack, eval_stack
 from experiments.cifar_features import rotated  # also patches the HF mirror
 
@@ -235,7 +237,7 @@ def main():
                                PlainMLP(2048, [dend.M], DEND_OUT),
                                nn.Linear(DEND_OUT, 10))),
         }
-    else:
+    elif ROUND == 6:
         # round 6 — StagedLinear head (extra_stages=1: each neuron gets one
         # extra learned scale-shift-leaky_relu bend on top of the base
         # Linear+leaky_relu) vs param-matched plain MLP. 2 hidden layers
@@ -256,27 +258,48 @@ def main():
             'cnn-staged1': new_arm('staged1', lambda w: StagedMLP(
                            2048, [w] * len(HEAD_HIDDEN), 10, extra_stages=1)),
         }
-        # SwiGLU gated FFN block, single param-matched stand-in for the
-        # whole head (same convention as DendriticLinear in round 5), not
-        # stacked to HEAD_HIDDEN's depth. Given its own, larger param budget
-        # (rather than head_target) so its gate/up width lands at ~100
-        # instead of the ~8 that head_target's budget would give it.
-        swiglu_target = count_params(SwiGLU(2048, 100, 10))
-        arms['cnn-swiglu'] = new_arm('swiglu', lambda w: SwiGLU(2048, w, 10),
-                                      target=swiglu_target)
+        # SwiGLU gated FFN block, single stand-in for the whole head (same
+        # convention as DendriticLinear in round 5), not stacked to
+        # HEAD_HIDDEN's depth and not param-matched — gate/up width fixed
+        # to 256, matching round 7's hardcoded hidden width.
+        swiglu = SwiGLU(2048, 256, 10)
+        print(f'swiglu: {count_params(swiglu):,} params', flush=True)
+        arms['cnn-swiglu'] = lambda: E2E(SwiGLU(2048, 256, 10))
         arms['cnn-mlp'] = lambda: E2E(
                                PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10))
+    else:
+        # round 7 — hardcoded 2048 -> 256 -> 256 -> 10 shape (no param
+        # matching): BranchedLinear (parallel-branch adaptive activation,
+        # extra_branches) and NeighborLinear (cheap neuron-mixing second
+        # stage, neighbors) heads swept at 1/2/4 on their respective
+        # variable, vs a plain MLP of the identical shape. Trained/evaluated
+        # under torch.compile (see train_stack/eval_stack's compile= flag).
+        STAGE_HIDDEN = [256, 256]
+
+        def build_arm(name, cls, **kw):
+            model = cls(2048, STAGE_HIDDEN, 10, **kw)
+            print(f'{name}: {count_params(model):,} params', flush=True)
+            return lambda: E2E(cls(2048, STAGE_HIDDEN, 10, **kw))
+
+        arms = {}
+        for n in (1, 2, 4):
+            arms[f'cnn-branched{n}'] = build_arm(
+                f'branched{n}', BranchedMLP, extra_branches=n)
+            arms[f'cnn-neighbor{n}'] = build_arm(
+                f'neighbor{n}', NeighborMLP, neighbors=n)
+        arms['cnn-mlp'] = build_arm('mlp', PlainMLP)
 
     results = {}
     for name, factory in arms.items():
         models = make_models(factory)
         print(f'--- {name}: {count_params(models[0])} params x {len(models)} models',
               flush=True)
-        params, buffers, base = train_stack(models, flat_subsets, tx, ty)
+        params, buffers, base = train_stack(models, flat_subsets, tx, ty,
+                                            compile=(ROUND == 7))
         acc = eval_stack(params, buffers, base, ex, ey,
-                         chunk=500).reshape(len(SIZES), SEEDS)
+                         chunk=500, compile=(ROUND == 7)).reshape(len(SIZES), SEEDS)
         acc_r = eval_stack(params, buffers, base, ex_rot, ey,
-                           chunk=500).reshape(len(SIZES), SEEDS)
+                           chunk=500, compile=(ROUND == 7)).reshape(len(SIZES), SEEDS)
         results[name] = {'params': count_params(models[0]),
                          'clean': acc.tolist(), 'rot45': acc_r.tolist()}
         for si, n in enumerate(SIZES):
