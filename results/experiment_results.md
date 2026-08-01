@@ -312,17 +312,44 @@ and the only arm ever ahead of the MLP under co-adaptation. TagNet-weighted
 holds the single rot45-beats-mlp result on frozen features. The old
 neuron's remaining unique win is the MNIST pixel regime.
 
+## Experiment 6 — ProjNet dissection (round 3: what was doing the work?)
+
+Controls: proj-d1 (geometry control), projI-d4 (P frozen to identity),
+mlp-flop (MLP at proj-d2's FLOPs: head width 100 / 49.6k params vs the
+param-matched 57 / 25.8k; e2e head width 27 vs 15). e2e adds cnn-proj-d2.
+
+1. **The vector geometry is doing NOTHING.** proj-d1 - proj-d2 clean:
+   +0.31/+0.18/+0.06/-0.03 (d1 slightly AHEAD at small n). projI-d4 -
+   proj-d4: +0.11/+0.03/+0.00/+0.06. D=1 matches D=4; identity P matches
+   learned P. Same on e2e (cnn-projI-d4 ~ cnn-proj-d4; cnn-proj-d1 ~
+   cnn-proj-d2 except one diverged seed at 50k, -31 pts — D>=2 may act as
+   a stabilizer, or luck).
+2. **What ProjNet actually is:** at D=1 the neuron is
+   ReLU(|z|+b)*sign(z) with learnable b<0 — i.e. SOFT-THRESHOLDING
+   (torch's Softshrink with a learnable per-unit threshold). The entire
+   round-2 "new architecture" win is this activation function: odd
+   (sign-preserving), sparsifying, no ReLU mean-shift. Everything else —
+   directions, projections, interference — is passenger.
+3. **FLOP control, frozen features:** mlp-flop ~ mlp (+0.34 -> +0.01) —
+   extra compute buys nothing there, and the MLP stays ~1 pt ahead of the
+   proj family everywhere (0/5), plus 2-4 pts on rot45 at mid sizes.
+4. **FLOP control, e2e:** cnn-mlp-flop beats cnn-mlp (+3.0/+0.9/+1.3) —
+   the round-1/2 param-matched MLP head was compute-starved, which
+   inflated the proj wins. But at n=2000 proj STILL beats even the
+   FLOP-matched MLP (+1.2 to +1.6, 4/5), so a real small-data edge
+   survives the strictest control; at 50k mlp-flop wins (-1.1, 0/5, and
+   best overall: 74.13).
+
+**Verdict:** the Variant A result reduces to: a learnable soft-threshold
+activation beats ReLU in low-data end-to-end training and loses on frozen
+features / large n. No vector story survives. TagNet-weighted's rot45 win
+at n>=10k (exp 5) is now the only standing result that involves any
+direction/agreement mechanism.
+
 ## Queue
 
-- **Round 3 built, awaiting box run** (`cifar_head_task.py 3`,
-  `cifar_e2e.py 3`): what part of ProjNet is doing the work? proj-d1
-  (geometry control: D=1 collapses to a scalar net with a thresholded
-  |z|-style activation — if it matches d2/d4, the win is the activation,
-  not the geometry), projI-d4 (P frozen to identity: is the learned
-  projection needed?), mlp-flop (MLP at proj-d2's FLOPs, ~1.9x params:
-  head width 100 vs 57; e2e head width 27 vs 15 — kills the "just more
-  compute" objection). e2e round 3 also adds cnn-proj-d2 as the missing
-  D ablation / FLOP reference.
+- Softshrink-vs-ReLU is a known-ish activation family (shrinkage/ISTA
+  lineage) — literature check before claiming anything.
 - TagNet e2e instability: warmup or gain clamp if we ever need B in a
   trainable host.
 - Rot45 gap vs rotation angle; pose linear probe (why is matrix robust?).
