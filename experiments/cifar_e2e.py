@@ -207,21 +207,31 @@ def main():
         }
     else:
         # round 5 — a single DendriticLinear as the whole head (its internal
-        # dendrite stage already plays the role of a hidden layer), in and
-        # out matched to the backbone/classes: 2048 -> 10, fan_in K=16,
-        # coverage=2 (each soma's dendrites collectively tile the 2048
-        # inputs twice). Compared against the shape-matched dense MLP the
-        # layer's own docstring describes: Linear(2048, M) -> ReLU ->
-        # Linear(M, 10), M = out_features * D dendrites.
-        dend = DendriticLinear(2048, 10, fan_in=16, coverage=2)
-        mlp = PlainMLP(2048, [dend.M], 10)
+        # dendrite stage already plays the role of a hidden layer), fed into
+        # a plain Linear classifier from the dendritic module's output size
+        # to the class count. DEND_OUT is separate from the dendritic
+        # module's own construction so its width can change independently
+        # (fan_in K=16, coverage=2 -> each soma's dendrites collectively
+        # tile the 2048 inputs twice) without touching the classifier.
+        # Compared against the shape-matched dense MLP the layer's own
+        # docstring describes: Linear(2048, M) -> ReLU -> Linear(M, DEND_OUT)
+        # -> Linear(DEND_OUT, 10), M = out_features * D dendrites.
+        DEND_OUT = 10
+
+        def build_dend():
+            dend = DendriticLinear(2048, DEND_OUT, fan_in=16, coverage=2)
+            return nn.Sequential(dend, nn.Linear(DEND_OUT, 10))
+
+        dend = DendriticLinear(2048, DEND_OUT, fan_in=16, coverage=2)
+        mlp = PlainMLP(2048, [dend.M], DEND_OUT)
         print(f'round 5: dendritic head {count_params(dend):,} params '
               f'(K={dend.K}, D={dend.D}, M={dend.M}) | '
               f'shape-matched mlp head {count_params(mlp):,} params', flush=True)
         arms = {
-            'cnn-dendritic': lambda: E2E(
-                               DendriticLinear(2048, 10, fan_in=16, coverage=2)),
-            'cnn-mlp-matched': lambda: E2E(PlainMLP(2048, [dend.M], 10)),
+            'cnn-dendritic': lambda: E2E(build_dend()),
+            'cnn-mlp-matched': lambda: E2E(nn.Sequential(
+                               PlainMLP(2048, [dend.M], DEND_OUT),
+                               nn.Linear(DEND_OUT, 10))),
         }
 
     results = {}
