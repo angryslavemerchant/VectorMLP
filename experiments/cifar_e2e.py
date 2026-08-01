@@ -23,6 +23,12 @@ Round 3 (`... 3`): ProjNet controls — cnn-proj-d2, cnn-proj-d1 (geometry
 control), cnn-projI-d4 (P frozen to identity), cnn-mlp-flop (head matched
 to cnn-proj-d2's head FLOPs, params unconstrained).
 
+Round 4 (`... 4`): multi-gate neuron (MGN, see mgn.py) head vs a
+param-matched plain MLP head, same trainable backbone:
+
+    cnn-mgn   MGNNet head (per-neuron learned SUM/AND/OR softmax mix)
+    cnn-mlp   param-matched plain MLP head (same target as round 1)
+
 Sizes x 5 seeds, vmap-stacked. Heavier than the head-only grids (conv
 activations for 15 stacked models) — meant for a box, not the laptop.
 """
@@ -42,6 +48,7 @@ from torchvision.datasets import CIFAR10
 from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
                         matched_mlp_width, matched_width, proj_flops,
                         matched_mlp_flops)
+from mgn import MGNNet
 from experiments.mnist_grid import balanced_subset, train_stack, eval_stack
 from experiments.cifar_features import rotated  # also patches the HF mirror
 
@@ -139,7 +146,7 @@ def main():
                 'tagq-d4': lambda w: TagNet(2048, [w] * len(HEAD_HIDDEN), 10, 4,
                                             mode='query'),
             }.items()}
-    else:
+    elif ROUND == 3:
         # round 3 — ProjNet controls (see cifar_head_task.py round 3).
         # cnn-proj-d2 wasn't in round 2, so it runs here both as the D
         # ablation and as the FLOP reference for cnn-mlp-flop. The FLOP
@@ -167,6 +174,23 @@ def main():
                                 learn_proj=False)),
             'cnn-mlp-flop': lambda: E2E(
                 PlainMLP(2048, [fw] * len(HEAD_HIDDEN), 10)),
+        }
+    else:
+        # round 4 — multi-gate neuron (MGN) head vs param-matched plain MLP.
+        mlp_w, mlp_par = matched_mlp_width(head_target, 2048, 10, len(HEAD_HIDDEN))
+        print(f'round 4: mgn head target {head_target:,} | mlp head width '
+              f'{mlp_w}, {mlp_par:,} params', flush=True)
+
+        def new_arm(name, build):
+            w, got = matched_width(head_target, build)
+            print(f'{name}: head width {w}, {got:,} params', flush=True)
+            return lambda: E2E(build(w))
+
+        arms = {
+            'cnn-mgn': new_arm('mgn', lambda w: MGNNet(
+                           2048, [w] * len(HEAD_HIDDEN), 10)),
+            'cnn-mlp': lambda: E2E(
+                           PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10)),
         }
 
     results = {}
