@@ -43,3 +43,23 @@ class SwiGLU(nn.Module):
             f"in_features={self.in_features}, hidden={self.hidden}, "
             f"out_features={self.out_features}, total_params={p}"
         )
+
+
+class SwiGLUMLP(nn.Module):
+    """Same shape/role as vector_mlp.PlainMLP, but hidden transitions are
+    SwiGLU blocks instead of Linear+ReLU pairs. Each transition a -> b uses
+    SwiGLU(a, b, b): the gate/up projections expand to b (the transition's
+    own output width doubling as the block's internal hidden width, so no
+    separate expansion hyperparameter is needed), and the down projection
+    maps that straight back to b. The final classifier stays a bare
+    nn.Linear, matching StagedMLP/BranchedMLP/NeighborMLP's convention."""
+
+    def __init__(self, in_features, hidden, num_classes, **kw):
+        super().__init__()
+        widths = [in_features] + list(hidden)
+        self.body = nn.Sequential(*[
+            SwiGLU(a, b, b, **kw) for a, b in zip(widths[:-1], widths[1:])])
+        self.head = nn.Linear(widths[-1], num_classes)
+
+    def forward(self, x):
+        return self.head(self.body(x))

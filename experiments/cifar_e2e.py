@@ -60,7 +60,7 @@ from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
 from mgn import MGNNet, MGNv4Net
 from dendritic_linear import DendriticLinear
 from staged_linear import StagedMLP
-from swiglu import SwiGLU
+from swiglu import SwiGLU, SwiGLUMLP
 from branched_linear import BranchedMLP
 from neighbor_linear import NeighborMLP
 from experiments.mnist_grid import balanced_subset, train_stack, eval_stack
@@ -267,7 +267,7 @@ def main():
         arms['cnn-swiglu'] = lambda: E2E(SwiGLU(2048, 256, 10))
         arms['cnn-mlp'] = lambda: E2E(
                                PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10))
-    else:
+    elif ROUND == 7:
         # round 7 — hardcoded 2048 -> 256 -> 256 -> 10 shape (no param
         # matching): BranchedLinear (parallel-branch adaptive activation,
         # extra_branches) and NeighborLinear (cheap neuron-mixing second
@@ -288,6 +288,26 @@ def main():
             arms[f'cnn-neighbor{n}'] = build_arm(
                 f'neighbor{n}', NeighborMLP, neighbors=n)
         arms['cnn-mlp'] = build_arm('mlp', PlainMLP)
+    else:
+        # round 8 — same hardcoded 2048 -> 256 -> 256 -> 10 shape and
+        # torch.compile convention as round 7, revisiting StagedLinear
+        # (extra_stages 1/2/4) at that shape instead of round 6's
+        # param-matched width, plus a stacked SwiGLUMLP (2 SwiGLU blocks,
+        # 2048->256->256, then a bare Linear(256,10) classifier) vs the
+        # same dense baseline.
+        STAGE_HIDDEN = [256, 256]
+
+        def build_arm(name, cls, **kw):
+            model = cls(2048, STAGE_HIDDEN, 10, **kw)
+            print(f'{name}: {count_params(model):,} params', flush=True)
+            return lambda: E2E(cls(2048, STAGE_HIDDEN, 10, **kw))
+
+        arms = {}
+        for n in (1, 2, 4):
+            arms[f'cnn-staged{n}'] = build_arm(
+                f'staged{n}', StagedMLP, extra_stages=n)
+        arms['cnn-swiglu'] = build_arm('swiglu', SwiGLUMLP)
+        arms['cnn-mlp'] = build_arm('mlp', PlainMLP)
 
     results = {}
     for name, factory in arms.items():
@@ -295,11 +315,11 @@ def main():
         print(f'--- {name}: {count_params(models[0])} params x {len(models)} models',
               flush=True)
         params, buffers, base = train_stack(models, flat_subsets, tx, ty,
-                                            compile=(ROUND == 7))
-        acc = eval_stack(params, buffers, base, ex, ey,
-                         chunk=500, compile=(ROUND == 7)).reshape(len(SIZES), SEEDS)
-        acc_r = eval_stack(params, buffers, base, ex_rot, ey,
-                           chunk=500, compile=(ROUND == 7)).reshape(len(SIZES), SEEDS)
+                                            compile=(ROUND in (7, 8)))
+        acc = eval_stack(params, buffers, base, ex, ey, chunk=500,
+                         compile=(ROUND in (7, 8))).reshape(len(SIZES), SEEDS)
+        acc_r = eval_stack(params, buffers, base, ex_rot, ey, chunk=500,
+                           compile=(ROUND in (7, 8))).reshape(len(SIZES), SEEDS)
         results[name] = {'params': count_params(models[0]),
                          'clean': acc.tolist(), 'rot45': acc_r.tolist()}
         for si, n in enumerate(SIZES):
