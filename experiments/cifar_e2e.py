@@ -59,6 +59,7 @@ from vector_mlp import (VectorMLP, PlainMLP, ProjNet, TagNet, count_params,
                         matched_mlp_flops)
 from mgn import MGNNet, MGNv4Net
 from dendritic_linear import DendriticLinear
+from staged_linear import StagedMLP
 from experiments.mnist_grid import balanced_subset, train_stack, eval_stack
 from experiments.cifar_features import rotated  # also patches the HF mirror
 
@@ -205,7 +206,7 @@ def main():
             'cnn-mlp': lambda: E2E(
                            PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10)),
         }
-    else:
+    elif ROUND == 5:
         # round 5 — a single DendriticLinear as the whole head (its internal
         # dendrite stage already plays the role of a hidden layer), fed into
         # a plain Linear classifier from the dendritic module's output size
@@ -233,6 +234,31 @@ def main():
                                PlainMLP(2048, [dend.M], DEND_OUT),
                                nn.Linear(DEND_OUT, 10))),
         }
+    else:
+        # round 6 — StagedLinear heads (extra_stages = 1, 2, 4: each neuron
+        # gets 1/2/4 extra learned scale-shift-leaky_relu bends on top of the
+        # base Linear+leaky_relu) vs param-matched plain MLP. 2 hidden layers
+        # (same depth as HEAD_HIDDEN), width found per-arm via matched_width
+        # since each extra_stages setting adds a slightly different (tiny)
+        # per-neuron param cost on top of the same matmul. Final classifier
+        # is a bare nn.Linear in every arm — StagedLinear always leaky_relus
+        # internally, which would clip logits if used as the last layer.
+        mlp_w, mlp_par = matched_mlp_width(head_target, 2048, 10, len(HEAD_HIDDEN))
+        print(f'round 6: staged-linear head target {head_target:,} | '
+              f'mlp head width {mlp_w}, {mlp_par:,} params', flush=True)
+
+        def new_arm(name, build):
+            w, got = matched_width(head_target, build)
+            print(f'{name}: head width {w}, {got:,} params', flush=True)
+            return lambda: E2E(build(w))
+
+        arms = {
+            f'cnn-staged{n}': new_arm(f'staged{n}', lambda w, n=n: StagedMLP(
+                           2048, [w] * len(HEAD_HIDDEN), 10, extra_stages=n))
+            for n in (1, 2, 4)
+        }
+        arms['cnn-mlp'] = lambda: E2E(
+                               PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10))
 
     results = {}
     for name, factory in arms.items():
