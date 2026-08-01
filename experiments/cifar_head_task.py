@@ -33,9 +33,13 @@ param-matched plain MLP:
            reductions over the same weighted inputs (v1: per-synapse
            sigmoid(w*x) truth values, [B, n_out, n_in] expansion)
     mgnv4  MGNv4Net head: project-then-reduce — each neuron projects the
-           input down to k=dim learned features via a plain matmul, then
+           input down to k learned features via a plain matmul, then
            reduces AND/OR over those k instead of over n_in, so
-           discrimination doesn't decay with fan-in the way v1-v3 do
+           discrimination doesn't decay with fan-in the way v1-v3 do.
+           k=2 here (not dim=16): the proj matmul costs ~(1+k)x a plain
+           neuron's params, and at k=dim the param-matched width
+           collapses to 3-4 hidden units — k=2 keeps the layer wide
+           enough to be a meaningful comparison
     mlp    param-matched plain MLP head (same target as round 1)
 
 (mgnv2/mgnv3 — matmul-native intermediate attempts — were dropped from
@@ -183,7 +187,7 @@ def main():
             'mgn': (new_arm('mgn', lambda w: MGNNet(
                         FEAT, [w] * len(HIDDEN), 10)), tx, ex, ex_rot),
             'mgnv4': (new_arm('mgnv4', lambda w: MGNv4Net(
-                        FEAT, [w] * len(HIDDEN), 10, DIM)), tx, ex, ex_rot),
+                        FEAT, [w] * len(HIDDEN), 10, 2)), tx, ex, ex_rot),
             'mlp': (lambda: PlainMLP(FEAT, [mlp_w] * len(HIDDEN), 10),
                     tx, ex, ex_rot),
         }

@@ -28,8 +28,10 @@ param-matched plain MLP head, same trainable backbone:
 
     cnn-mgn    MGNNet head (per-neuron learned SUM/AND/OR softmax mix,
                v1: per-synapse expansion)
-    cnn-mgnv4  MGNv4Net head: project-then-reduce (k=dim learned features
-               per neuron, AND/OR reduce over k instead of over n_in)
+    cnn-mgnv4  MGNv4Net head: project-then-reduce (k=2 learned features
+               per neuron, AND/OR reduce over k instead of over n_in;
+               k=2 not dim=16 — at k=dim the param-matched width
+               collapses to 3-4 hidden units)
     cnn-mlp    param-matched plain MLP head (same target as round 1)
 
 (cnn-mgnv2/cnn-mgnv3 — matmul-native intermediate attempts — were
@@ -198,7 +200,7 @@ def main():
             'cnn-mgn': new_arm('mgn', lambda w: MGNNet(
                            2048, [w] * len(HEAD_HIDDEN), 10)),
             'cnn-mgnv4': new_arm('mgnv4', lambda w: MGNv4Net(
-                           2048, [w] * len(HEAD_HIDDEN), 10, DIM)),
+                           2048, [w] * len(HEAD_HIDDEN), 10, 2)),
             'cnn-mlp': lambda: E2E(
                            PlainMLP(2048, [mlp_w] * len(HEAD_HIDDEN), 10)),
         }
