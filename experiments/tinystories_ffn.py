@@ -70,6 +70,7 @@ from branched_linear import BranchedLinear
 from conv_ffn import ConvFFN
 from neighbor_linear import NeighborLinear
 from per_neuron import BranchedActivation, SwiGLUBranched
+from quadratic_ffn import QuadraticFFN
 from sin_ffn import SinFFN
 from staged_linear import StagedLinear
 from swiglu import SwiGLU
@@ -166,6 +167,11 @@ def ffn_builders(d):
     # frequencies pinned at init: tune the wiring, not the grid
     b['sin25-fixed'] = (lambda h: SinFFN(d, h, sin_frac=0.25,
                                          learn_freq=False), 1, None)
+    # Quadratic neurons: rank sweeps width-versus-order at fixed params.
+    # rank=1 is a squared activation at full width; high rank is a handful of
+    # genuinely second-order neurons.
+    for r in (1, 2, 4, 8, 16, 32, 64):
+        b[f'quad{r}'] = (lambda h, r=r: QuadraticFFN(d, h, rank=r), 1, None)
     for k in (1, 2, 4):
         b[f'staged{k}'] = (lambda h, k=k: ffn_staged(d, h, k), 1, None)
         b[f'branch{k}'] = (lambda h, k=k: ffn_branched(d, h, k), 1, None)
