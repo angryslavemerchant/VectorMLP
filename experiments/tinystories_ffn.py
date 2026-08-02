@@ -70,6 +70,7 @@ from branched_linear import BranchedLinear
 from conv_ffn import ConvFFN
 from neighbor_linear import NeighborLinear
 from per_neuron import BranchedActivation, SwiGLUBranched
+from sin_ffn import SinFFN
 from staged_linear import StagedLinear
 from swiglu import SwiGLU
 from vector_mlp import count_params, matched_width
@@ -157,6 +158,14 @@ def ffn_builders(d):
         # within 0.3% of conv-small, so the two can be compared honestly.
         'mlp-tiny': (lambda h: ffn_mlp(d, h, 'gelu'), 1, 12),
     }
+    # Grid-cell-ish: a fraction of hidden neurons get periodic tuning curves.
+    # sin0 is exactly the mlp arm (no extra params), so the sweep nests its
+    # own control; sin100 is all-periodic, i.e. SIREN-style.
+    for pct in (0, 12, 25, 50, 100):
+        b[f'sin{pct}'] = (lambda h, p=pct: SinFFN(d, h, sin_frac=p / 100), 1, None)
+    # frequencies pinned at init: tune the wiring, not the grid
+    b['sin25-fixed'] = (lambda h: SinFFN(d, h, sin_frac=0.25,
+                                         learn_freq=False), 1, None)
     for k in (1, 2, 4):
         b[f'staged{k}'] = (lambda h, k=k: ffn_staged(d, h, k), 1, None)
         b[f'branch{k}'] = (lambda h, k=k: ffn_branched(d, h, k), 1, None)
@@ -350,8 +359,8 @@ def train_one(make_ffn, vocab, args, seed, train_data, val_data):
     # Did the branches actually engage? Without this a null result is ambiguous
     # between "the mechanism does not help" and "the bends were initialised
     # somewhere the data never reaches", which are very different conclusions.
-    drifts = [m.drift() for m in model.modules()
-              if isinstance(m, BranchedActivation) and m.extra_branches]
+    drifts = [d for d in (m.drift() for m in model.modules()
+                          if hasattr(m, 'drift')) if d]
     drift = {}
     if drifts:
         drift = {k: float(np.mean([d[k] for d in drifts])) for k in drifts[0]}
@@ -429,9 +438,17 @@ def main():
             val, n_params, secs, drift = train_one(
                 lambda: build(h), args.vocab, args, seed, train_data, val_data)
             losses.append(val)
-            extra = (f'  |w| {drift["w_abs_mean"]:.3f} '
-                     f'(init {drift["w_abs_init"]:.3f}, '
-                     f'moved {drift["w_drift"]:.3f})') if drift else ''
+            if 'omega_mean' in drift:
+                extra = (f'  omega {drift["omega_mean"]:.2f} '
+                         f'(init {drift["omega_init_mean"]:.2f}, '
+                         f'moved {drift["omega_drift"]:.2f}, '
+                         f'range {drift["omega_min"]:.2f}-{drift["omega_max"]:.2f})')
+            elif drift:
+                extra = (f'  |w| {drift["w_abs_mean"]:.3f} '
+                         f'(init {drift["w_abs_init"]:.3f}, '
+                         f'moved {drift["w_drift"]:.3f})')
+            else:
+                extra = ''
             print(f'--- {name} seed {seed}: val loss {val:.4f}  '
                   f'({n_params:,} params, {secs/60:.1f} min){extra}', flush=True)
         arr = np.array(losses)
