@@ -20,6 +20,7 @@ trained on the first --tokenizer-mb megabytes rather than the whole corpus.
 
 import argparse
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -76,24 +77,33 @@ def load_tokenizer(vocab_size=4096, tokenizer_mb=100):
     return train_tokenizer(vocab_size, tokenizer_mb, path)
 
 
-def encode_split(tok, split, out_path, eot_id):
-    """Encode a split into a flat uint16 .bin, one EOT between stories."""
-    ids = []
-    total = 0
+def encode_split(tok, split, out_path, eot_id, batch=10_000):
+    """Encode a split into a flat uint16 .bin, one EOT between stories.
+
+    Uses encode_batch — the Rust tokenizer parallelises across a batch, which
+    is far faster than one story at a time.
+    """
+    rows = raw_text(split)
+    n_rows = len(rows)
+    ids, total, t0 = [], 0, time.time()
+
     with open(out_path, 'wb') as f:
-        for i, row in enumerate(raw_text(split)):
-            ids.extend(tok.encode(row['text']).ids)
-            ids.append(eot_id)
-            if len(ids) >= 1_000_000:
-                np.asarray(ids, dtype=np.uint16).tofile(f)
-                total += len(ids)
-                ids = []
-                if i % 200_000 == 0:
-                    print(f'  {split}: {i:,} stories, {total:,} tokens',
-                          flush=True)
-        if ids:
+        for start in range(0, n_rows, batch):
+            chunk = rows[start:start + batch]['text']
+            for enc in tok.encode_batch(chunk):
+                ids.extend(enc.ids)
+                ids.append(eot_id)
+
             np.asarray(ids, dtype=np.uint16).tofile(f)
             total += len(ids)
+            ids = []
+
+            done = min(start + batch, n_rows)
+            rate = done / max(1e-9, time.time() - t0)
+            eta = (n_rows - done) / max(1e-9, rate)
+            print(f'  {split}: {done:,}/{n_rows:,} stories, {total:,} tokens, '
+                  f'{rate:,.0f} stories/s, eta {eta/60:.1f} min', flush=True)
+
     print(f'{split}: {total:,} tokens -> {out_path}', flush=True)
     return total
 
