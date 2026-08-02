@@ -67,6 +67,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from branched_linear import BranchedLinear
+from conv_ffn import ConvFFN
 from neighbor_linear import NeighborLinear
 from per_neuron import BranchedActivation, SwiGLUBranched
 from staged_linear import StagedLinear
@@ -94,6 +95,15 @@ def ffn_mlp(d, h, act='gelu'):
 
 def ffn_swiglu(d, h):
     return SwiGLU(d, h, d)
+
+
+def ffn_macs(module):
+    """Multiply-adds per token. Convs report their own, since their cost
+    depends on the grid they run at, not just their weight count."""
+    if hasattr(module, 'macs_per_token'):
+        return module.macs_per_token()
+    return sum(m.in_features * m.out_features
+               for m in module.modules() if isinstance(m, nn.Linear))
 
 
 def ffn_staged(d, h, k):
@@ -124,11 +134,17 @@ def ffn_swiglu_branched(d, h, k, where):
 
 
 def ffn_builders(d):
-    """name -> (build(hidden) -> Module, min_hidden)."""
+    """name -> (build(hidden) -> Module, min_hidden).
+
+    For the conv arms the search knob is the first-stage channel count rather
+    than a hidden width; peak channels follow at the 17/6 ratio of the spec.
+    """
     b = {
         'mlp':    (lambda h: ffn_mlp(d, h, 'gelu'), 1),
         'lrelu':  (lambda h: ffn_mlp(d, h, 'lrelu'), 1),
         'swiglu': (lambda h: ffn_swiglu(d, h), 1),
+        'conv':     (lambda c: ConvFFN(d, c1=c, peak='wide'), 4),
+        'conv-mid': (lambda c: ConvFFN(d, c1=c, peak='mid'), 4),
     }
     for k in (1, 2, 4):
         b[f'staged{k}'] = (lambda h, k=k: ffn_staged(d, h, k), 1)
@@ -373,11 +389,16 @@ def main():
     print(f'\nmodel {args.n_layer}L/{d}d/{args.n_head}H block {args.block} | '
           f'FFN budget {target:,} params (mlp 4x = {4 * d} hidden)\n', flush=True)
 
+    base_macs = ffn_macs(ffn_mlp(d, 4 * d))
     plans = {}
     for name, (build, min_h) in builders.items():
         h, got = matched_width(target, build, min_w=min_h)
         plans[name] = (build, h)
-        print(f'  {name:<8} hidden {h:<5} {got:,} FFN params', flush=True)
+        macs = ffn_macs(build(h))
+        # every arm is param-matched; the conv arms are NOT flop-matched, since
+        # weight sharing decouples the two, so print both
+        print(f'  {name:<9} width {h:<5} {got:>9,} params  '
+              f'{macs/1e6:>7.2f}M MACs/token ({macs/base_macs:.1f}x)', flush=True)
 
     steps = args.tokens // (args.batch * args.block)
     print(f'\n{args.tokens:,} tokens = {steps:,} steps of '
