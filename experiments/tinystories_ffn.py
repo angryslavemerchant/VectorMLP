@@ -30,6 +30,23 @@ Then screen cheaply and confirm expensively:
     python experiments/tinystories_ffn.py --tokens 500_000_000 --seeds 2 \
         --arms mlp,swiglu,staged1,branch1
 
+The first run said: swiglu 1.6512 < mlp 1.6679 < branch4 1.6860 < lrelu 1.7146,
+with staged and nbr slightly WORSE than lrelu. So gating wins, branched is the
+only per-neuron mechanism that helps, and the single largest effect is just
+using GELU instead of leaky_relu. The follow-up arms ask whether branched
+survives contact with either of those:
+
+    python experiments/tinystories_ffn.py --tokens 100_000_000 --seeds 3 \
+        --arms mlp,swiglu,branch1,branchG1,branchG2,sw-gate1,sw-gate2,sw-post1,sw-post2
+
+    branchG{k}   branched on a GELU base   -> mechanism, or leaky_relu crutch?
+    sw-gate{k}   branched on SwiGLU's gate -> complementary to gating?
+    sw-post{k}   branched on SwiGLU's product (identity base, so weight 0 is
+                 exactly stock SwiGLU)
+
+Each arm reports how far its branch weights moved from init, so a null result
+can be told apart from branches that never engaged.
+
 NOTE: this harness has not been executed. Expect to fix something on the first
 run; --tokens 2_000_000 --seeds 1 --no-compile is a ~1 minute smoke test.
 """
@@ -51,6 +68,7 @@ import torch.nn.functional as F
 
 from branched_linear import BranchedLinear
 from neighbor_linear import NeighborLinear
+from per_neuron import BranchedActivation, SwiGLUBranched
 from staged_linear import StagedLinear
 from swiglu import SwiGLU
 from vector_mlp import count_params, matched_width
@@ -92,6 +110,19 @@ def ffn_neighbor(d, h, k):
     return nn.Sequential(NeighborLinear(d, h, neighbors=k), nn.Linear(h, d))
 
 
+def ffn_branch_base(d, h, k, base):
+    """Branched activation on an arbitrary base — 'lrelu' reproduces the
+    branch{k} arm, 'gelu' is the ablation that asks whether the mechanism
+    survives a smooth base or was only rescuing leaky_relu."""
+    return nn.Sequential(nn.Linear(d, h),
+                         BranchedActivation(h, k, base=base),
+                         nn.Linear(h, d))
+
+
+def ffn_swiglu_branched(d, h, k, where):
+    return SwiGLUBranched(d, h, d, extra_branches=k, where=where)
+
+
 def ffn_builders(d):
     """name -> (build(hidden) -> Module, min_hidden)."""
     b = {
@@ -103,6 +134,11 @@ def ffn_builders(d):
         b[f'staged{k}'] = (lambda h, k=k: ffn_staged(d, h, k), 1)
         b[f'branch{k}'] = (lambda h, k=k: ffn_branched(d, h, k), 1)
         b[f'nbr{k}'] = (lambda h, k=k: ffn_neighbor(d, h, k), k)
+        # does branched survive a smooth base?
+        b[f'branchG{k}'] = (lambda h, k=k: ffn_branch_base(d, h, k, 'gelu'), 1)
+        # does it add anything on top of gating, which is what actually won?
+        b[f'sw-gate{k}'] = (lambda h, k=k: ffn_swiglu_branched(d, h, k, 'gate'), 1)
+        b[f'sw-post{k}'] = (lambda h, k=k: ffn_swiglu_branched(d, h, k, 'post'), 1)
     return b
 
 
@@ -283,7 +319,16 @@ def train_one(make_ffn, vocab, args, seed, train_data, val_data):
     val = evaluate(net, val_data, args.batch, args.block, DEVICE, args.eval_iters)
     if not args.no_compile:
         torch._dynamo.reset()
-    return val, n_params, time.time() - t0
+
+    # Did the branches actually engage? Without this a null result is ambiguous
+    # between "the mechanism does not help" and "the bends were initialised
+    # somewhere the data never reaches", which are very different conclusions.
+    drifts = [m.drift() for m in model.modules()
+              if isinstance(m, BranchedActivation) and m.extra_branches]
+    drift = {}
+    if drifts:
+        drift = {k: float(np.mean([d[k] for d in drifts])) for k in drifts[0]}
+    return val, n_params, time.time() - t0, drift
 
 
 def main():
@@ -340,16 +385,19 @@ def main():
 
     results = {}
     for name, (build, h) in plans.items():
-        losses = []
+        losses, drift = [], {}
         for seed in range(args.seeds):
-            val, n_params, secs = train_one(
+            val, n_params, secs, drift = train_one(
                 lambda: build(h), args.vocab, args, seed, train_data, val_data)
             losses.append(val)
+            extra = (f'  |w| {drift["w_abs_mean"]:.3f} '
+                     f'(init {drift["w_abs_init"]:.3f}, '
+                     f'moved {drift["w_drift"]:.3f})') if drift else ''
             print(f'--- {name} seed {seed}: val loss {val:.4f}  '
-                  f'({n_params:,} params, {secs/60:.1f} min)', flush=True)
+                  f'({n_params:,} params, {secs/60:.1f} min){extra}', flush=True)
         arr = np.array(losses)
         results[name] = {'hidden': h, 'params': n_params,
-                         'val_loss': losses,
+                         'val_loss': losses, 'drift': drift,
                          'mean': float(arr.mean()), 'std': float(arr.std())}
         print(f'=== {name}: {arr.mean():.4f} +- {arr.std():.4f} '
               f'(ppl {math.exp(arr.mean()):.2f})\n', flush=True)
