@@ -134,27 +134,38 @@ def ffn_swiglu_branched(d, h, k, where):
 
 
 def ffn_builders(d):
-    """name -> (build(hidden) -> Module, min_hidden).
+    """name -> (build(width) -> Module, min_width, fixed_width).
+
+    fixed_width=None means search for the width that hits the FFN parameter
+    budget. A number pins it instead, for arms that are deliberately NOT
+    param-matched — the small conv block and the tiny MLP that controls for it.
 
     For the conv arms the search knob is the first-stage channel count rather
     than a hidden width; peak channels follow at the 17/6 ratio of the spec.
     """
     b = {
-        'mlp':    (lambda h: ffn_mlp(d, h, 'gelu'), 1),
-        'lrelu':  (lambda h: ffn_mlp(d, h, 'lrelu'), 1),
-        'swiglu': (lambda h: ffn_swiglu(d, h), 1),
-        'conv':     (lambda c: ConvFFN(d, c1=c, peak='wide'), 4),
-        'conv-mid': (lambda c: ConvFFN(d, c1=c, peak='mid'), 4),
+        'mlp':    (lambda h: ffn_mlp(d, h, 'gelu'), 1, None),
+        'lrelu':  (lambda h: ffn_mlp(d, h, 'lrelu'), 1, None),
+        'swiglu': (lambda h: ffn_swiglu(d, h), 1, None),
+        'conv':     (lambda c: ConvFFN(d, c1=c, peak='wide'), 4, None),
+        'conv-mid': (lambda c: ConvFFN(d, c1=c, peak='mid'), 4, None),
+        # Deliberately tiny: 24 -> 10 -> 16 -> 16 -> 10 -> 24, ~9.6K params and
+        # 0.71x the standard FFN's arithmetic. Cheaper on BOTH axes, so it is
+        # not comparable to the param-matched arms...
+        'conv-small': (lambda c: ConvFFN(d, c1=10, c2=16, peak='wide'), 1, 10),
+        # ...which is what mlp-tiny is for: hidden 12 gives 9,612 params,
+        # within 0.3% of conv-small, so the two can be compared honestly.
+        'mlp-tiny': (lambda h: ffn_mlp(d, h, 'gelu'), 1, 12),
     }
     for k in (1, 2, 4):
-        b[f'staged{k}'] = (lambda h, k=k: ffn_staged(d, h, k), 1)
-        b[f'branch{k}'] = (lambda h, k=k: ffn_branched(d, h, k), 1)
-        b[f'nbr{k}'] = (lambda h, k=k: ffn_neighbor(d, h, k), k)
+        b[f'staged{k}'] = (lambda h, k=k: ffn_staged(d, h, k), 1, None)
+        b[f'branch{k}'] = (lambda h, k=k: ffn_branched(d, h, k), 1, None)
+        b[f'nbr{k}'] = (lambda h, k=k: ffn_neighbor(d, h, k), k, None)
         # does branched survive a smooth base?
-        b[f'branchG{k}'] = (lambda h, k=k: ffn_branch_base(d, h, k, 'gelu'), 1)
+        b[f'branchG{k}'] = (lambda h, k=k: ffn_branch_base(d, h, k, 'gelu'), 1, None)
         # does it add anything on top of gating, which is what actually won?
-        b[f'sw-gate{k}'] = (lambda h, k=k: ffn_swiglu_branched(d, h, k, 'gate'), 1)
-        b[f'sw-post{k}'] = (lambda h, k=k: ffn_swiglu_branched(d, h, k, 'post'), 1)
+        b[f'sw-gate{k}'] = (lambda h, k=k: ffn_swiglu_branched(d, h, k, 'gate'), 1, None)
+        b[f'sw-post{k}'] = (lambda h, k=k: ffn_swiglu_branched(d, h, k, 'post'), 1, None)
     return b
 
 
@@ -391,14 +402,21 @@ def main():
 
     base_macs = ffn_macs(ffn_mlp(d, 4 * d))
     plans = {}
-    for name, (build, min_h) in builders.items():
-        h, got = matched_width(target, build, min_w=min_h)
+    for name, (build, min_h, fixed) in builders.items():
+        if fixed is None:
+            h, got = matched_width(target, build, min_w=min_h)
+            tag = ''
+        else:
+            h = fixed
+            got = count_params(build(h))
+            tag = '  NOT param-matched'
         plans[name] = (build, h)
         macs = ffn_macs(build(h))
-        # every arm is param-matched; the conv arms are NOT flop-matched, since
-        # weight sharing decouples the two, so print both
-        print(f'  {name:<9} width {h:<5} {got:>9,} params  '
-              f'{macs/1e6:>7.2f}M MACs/token ({macs/base_macs:.1f}x)', flush=True)
+        # arms are param-matched unless tagged; conv arms are never
+        # flop-matched, since weight sharing decouples params from compute
+        print(f'  {name:<11} width {h:<5} {got:>9,} params '
+              f'({got/target:>5.1%} of budget)  {macs/1e6:>7.2f}M MACs/token '
+              f'({macs/base_macs:>5.2f}x){tag}', flush=True)
 
     steps = args.tokens // (args.batch * args.block)
     print(f'\n{args.tokens:,} tokens = {steps:,} steps of '
@@ -430,8 +448,8 @@ def main():
 
     print('\nsummary (lower is better):')
     for name, r in sorted(results.items(), key=lambda kv: kv[1]['mean']):
-        print(f'  {name:<8} {r["mean"]:.4f} +- {r["std"]:.4f}  '
-              f'ppl {math.exp(r["mean"]):.2f}  hidden {r["hidden"]}')
+        print(f'  {name:<11} {r["mean"]:.4f} +- {r["std"]:.4f}  '
+              f'ppl {math.exp(r["mean"]):.2f}  width {r["hidden"]}')
     print(f'\nsaved -> {out}')
 
 
